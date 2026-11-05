@@ -82,6 +82,42 @@ contextBridge.exposeInMainWorld('electron', {
     send: (req: any) => ipcRenderer.invoke('http:send', req),
     cancel: (id: string) => ipcRenderer.invoke('http:cancel', id),
   },
+  dockerfile: {
+    pick: (current?: string) => ipcRenderer.invoke('dockerfile:pick', current),
+    pickFolder: (current?: string) =>
+      ipcRenderer.invoke('dockerfile:pick-folder', current),
+    read: (file: string) => ipcRenderer.invoke('dockerfile:read', file),
+    up: (recipe: any, rebuild: boolean) =>
+      ipcRenderer.invoke('dockerfile:up', recipe, rebuild),
+    stopBuild: (id: string) => ipcRenderer.invoke('dockerfile:stop-build', id),
+  },
+  sql: {
+    targets: () => ipcRenderer.invoke('sql:targets'),
+    databases: (id: string) => ipcRenderer.invoke('sql:databases', id),
+    tables: (id: string, db: string) =>
+      ipcRenderer.invoke('sql:tables', id, db),
+    run: (
+      runId: string,
+      id: string,
+      db: string,
+      sql: string,
+      dryRun?: boolean,
+    ) => ipcRenderer.invoke('sql:run', runId, id, db, sql, dryRun),
+    cancel: (runId: string) => ipcRenderer.invoke('sql:cancel', runId),
+    snapshots: (container?: string, db?: string) =>
+      ipcRenderer.invoke('sql:snapshots', container, db),
+    snapshot: (id: string, db: string, name?: string, auto?: boolean) =>
+      ipcRenderer.invoke('sql:snapshot', id, db, name, auto),
+    renameSnapshot: (file: string, name: string) =>
+      ipcRenderer.invoke('sql:rename-snapshot', file, name),
+    restore: (id: string, db: string, file: string) =>
+      ipcRenderer.invoke('sql:restore', id, db, file),
+    deleteSnapshot: (file: string) =>
+      ipcRenderer.invoke('sql:delete-snapshot', file),
+  },
+  oauth: {
+    token: (req: any) => ipcRenderer.invoke('oauth:token', req),
+  },
   files: {
     openText: (title: string, extensions: string[]) =>
       ipcRenderer.invoke('files:open-text', title, extensions),

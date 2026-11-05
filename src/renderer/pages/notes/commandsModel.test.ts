@@ -1,3 +1,4 @@
+import { exportPackages, importPackages } from './commandsModel';
 import {
   CommandsState,
   COMMAND_PRESETS,
@@ -238,5 +239,90 @@ describe('commandsModel', () => {
     expect(withIcons.groups.map((g) => g.icon)).toEqual(['database', null]);
     expect(duplicateGroup(withIcons, 'a').groups[1].icon).toBe('database');
     expect(duplicateGroup(parsed, 'a').groups[1].color).toBe('teal');
+  });
+});
+
+describe('export / import of packages', () => {
+  const pkgs: any = {
+    groups: [
+      {
+        id: 'b',
+        name: 'Backend',
+        stopOnError: true,
+        collapsed: true,
+        commands: [
+          {
+            id: 'c1',
+            name: 'dev',
+            command: 'npm run start:dev',
+            cwd: '~/api',
+            wait: false,
+          },
+        ],
+      },
+      {
+        id: 's',
+        name: 'Stack',
+        stopOnError: true,
+        collapsed: false,
+        commands: [
+          {
+            id: 'c2',
+            name: '',
+            command: '',
+            cwd: '',
+            wait: true,
+            packageId: 'b',
+          },
+        ],
+      },
+      {
+        id: 'x',
+        name: 'Other',
+        stopOnError: true,
+        collapsed: false,
+        commands: [],
+      },
+    ],
+  };
+
+  it('exports a package together with the packages it runs', () => {
+    const file = JSON.parse(exportPackages(pkgs, ['s']));
+    expect(file.stackrun).toBe('commands');
+    expect(file.groups.map((g: any) => g.name)).toEqual(['Backend', 'Stack']);
+    expect(JSON.parse(exportPackages(pkgs)).groups).toHaveLength(3);
+  });
+
+  it('imports with new ids, keeps links, marks clashing names', () => {
+    const { state: next, added } = importPackages(
+      pkgs,
+      exportPackages(pkgs, ['s']),
+    );
+    expect(added).toEqual(['Backend (imported)', 'Stack (imported)']);
+    const [backend, stack] = next.groups.slice(3);
+    expect(backend.id).not.toBe('b');
+    expect(stack.commands[0].packageId).toBe(backend.id);
+    expect(backend.commands[0].command).toBe('npm run start:dev');
+  });
+
+  it('replaces an empty default package and refuses other files', () => {
+    const fresh: any = {
+      groups: [
+        {
+          id: 'g-default',
+          name: 'Commands',
+          stopOnError: true,
+          collapsed: false,
+          commands: [],
+        },
+      ],
+    };
+    const { state: next } = importPackages(fresh, exportPackages(pkgs, ['b']));
+    expect(next.groups.map((g: any) => g.name)).toEqual(['Backend']);
+    expect(() => importPackages(pkgs, 'nope')).toThrow('Not a JSON file');
+    expect(() =>
+      importPackages(pkgs, '{"stackrun":"http","groups":[]}'),
+    ).toThrow();
+    expect(() => importPackages(pkgs, '{"groups":[]}')).toThrow();
   });
 });

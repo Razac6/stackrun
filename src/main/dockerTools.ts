@@ -391,7 +391,8 @@ export interface ExecStep {
   alt?: string[]; // same thing with another client binary (mysql / mariadb, mongosh / mongo)
 }
 
-const isSafeDbName = (name: string) => /^[A-Za-z0-9_$-]{1,64}$/.test(name);
+export const isSafeDbName = (name: string) =>
+  /^[A-Za-z0-9_$-]{1,64}$/.test(name);
 
 /** The default database a reset applies to, from the container env. */
 export const defaultDbName = (kind: DbKind, env: Record<string, string>) => {

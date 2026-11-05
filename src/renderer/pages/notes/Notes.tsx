@@ -45,6 +45,7 @@ import Base64Tool from './Base64Tool';
 import DockerTool from './DockerTool';
 import CommandsTool from './CommandsTool';
 import HttpClientTool from '../http/HttpClientTool';
+import SqlClientTool from '../sql/SqlClientTool';
 import BottomToast from './BottomToast';
 import VersionHistoryDialog, { NoteVersion } from './VersionHistoryDialog';
 import {
@@ -73,6 +74,7 @@ export type Mode =
   | 'compare'
   | 'http'
   | 'client'
+  | 'sql'
   | 'base64'
   | 'docker'
   | 'commands';
@@ -394,6 +396,11 @@ function Notes({
       {mode === 'client' && (
         <Box sx={{ flex: 1, minHeight: 0 }}>
           <HttpClientTool openRequest={openRequest} />
+        </Box>
+      )}
+      {mode === 'sql' && (
+        <Box sx={{ flex: 1, minHeight: 0 }}>
+          <SqlClientTool />
         </Box>
       )}
       {mode === 'docker' && (

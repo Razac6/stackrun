@@ -1,13 +1,15 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { MemoryRouter as Router } from 'react-router-dom';
 import { ThemeProvider } from '@mui/material/styles';
 import CssBaseline from '@mui/material/CssBaseline';
 import GlobalStyles from '@mui/material/GlobalStyles';
 import { Box } from '@mui/material';
 import Notes from './pages/notes/Notes';
-import SettingsPage, { THEME_KEY } from './pages/settings/Settings';
+import SettingsPage, {
+  THEME_KEY,
+  themeChoice,
+} from './pages/settings/Settings';
 import Layout, { MENU, Page } from './components/Layout';
-import SearchOverlay, { IS_MAC } from './components/SearchOverlay';
+import SearchOverlay from './components/SearchOverlay';
 import type { SearchResult } from './components/searchModel';
 import ErrorBoundary from './components/ErrorBoundary';
 import { resolveTheme } from './themes';
@@ -33,18 +35,14 @@ export default function App() {
     at: number;
   } | null>(null);
 
-  // Ctrl+K, or ⌘K on macOS
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key.toLowerCase() !== 'k' || e.altKey || e.shiftKey) return;
-      if (IS_MAC ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey) {
-        e.preventDefault();
-        setSearchOpen((o) => !o);
-      }
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, []);
+  // Ctrl+K, or ⌘K on macOS: the app menu's "Go → Search…" sends it (see main.ts)
+  useEffect(
+    () =>
+      window.electron.ipcRenderer.on('app:search', () =>
+        setSearchOpen((o) => !o),
+      ),
+    [],
+  );
 
   const searchTools = useMemo(
     () => [
@@ -87,10 +85,23 @@ export default function App() {
     window.electron.database.setSetting(key, value);
   };
 
-  // Luma unless you picked Classic
+  // Luma unless you picked another; "system" follows the OS light / dark mode
+  const [osDark, setOsDark] = useState(
+    () => window.matchMedia?.('(prefers-color-scheme: dark)').matches ?? false,
+  );
+  useEffect(() => {
+    const mq = window.matchMedia?.('(prefers-color-scheme: dark)');
+    if (!mq) return undefined;
+    const on = (e: MediaQueryListEvent) => setOsDark(e.matches);
+    mq.addEventListener('change', on);
+    return () => mq.removeEventListener('change', on);
+  }, []);
+  const choice = themeChoice(settings[THEME_KEY]);
   const themeSettings = {
     ...settings,
-    [THEME_KEY]: settings[THEME_KEY] === 'classic' ? 'classic' : 'luma',
+    [THEME_KEY]:
+      // eslint-disable-next-line no-nested-ternary
+      choice === 'system' ? (osDark ? 'luma-dark' : 'luma') : choice,
   };
   const theme = useMemo(
     () => resolveTheme(themeSettings),
@@ -116,39 +127,37 @@ export default function App() {
         }}
       />
       <ErrorBoundary>
-        <Router>
-          <Layout
-            page={page}
-            onPage={setPage}
-            onSearch={() => setSearchOpen(true)}
+        <Layout
+          page={page}
+          onPage={setPage}
+          onSearch={() => setSearchOpen(true)}
+        >
+          {/* the tools stay mounted while Settings is open: nothing is lost */}
+          <Box
+            sx={{
+              height: '100%',
+              display: page === 'settings' ? 'none' : 'block',
+            }}
           >
-            {/* the tools stay mounted while Settings is open: nothing is lost */}
-            <Box
-              sx={{
-                height: '100%',
-                display: page === 'settings' ? 'none' : 'block',
-              }}
-            >
-              <Notes
-                mode={page === 'settings' ? 'commands' : page}
-                onModeChange={setPage}
-                openRun={openRun}
-                openNote={openNote}
-                openPackage={openPackage}
-                openRequest={openRequest}
-              />
-            </Box>
-            {page === 'settings' && (
-              <SettingsPage settings={settings} onChange={changeSetting} />
-            )}
-          </Layout>
-          <SearchOverlay
-            open={searchOpen}
-            tools={searchTools}
-            onClose={() => setSearchOpen(false)}
-            onPick={pick}
-          />
-        </Router>
+            <Notes
+              mode={page === 'settings' ? 'commands' : page}
+              onModeChange={setPage}
+              openRun={openRun}
+              openNote={openNote}
+              openPackage={openPackage}
+              openRequest={openRequest}
+            />
+          </Box>
+          {page === 'settings' && (
+            <SettingsPage settings={settings} onChange={changeSetting} />
+          )}
+        </Layout>
+        <SearchOverlay
+          open={searchOpen}
+          tools={searchTools}
+          onClose={() => setSearchOpen(false)}
+          onPick={pick}
+        />
       </ErrorBoundary>
     </ThemeProvider>
   );

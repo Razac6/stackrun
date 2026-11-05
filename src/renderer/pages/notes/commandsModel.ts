@@ -571,3 +571,84 @@ export const COMMAND_PRESETS: CommandPreset[] = [
     },
   },
 ];
+
+// ---------------- export / import ----------------
+// A file with packages (and the packages they run, so links keep working):
+// { "stackrun": "commands", "version": 1, "groups": [...] }
+export const EXPORT_KIND = 'commands';
+
+/** Packages to save: the chosen ones (default: all) plus every package they run. */
+export const exportPackages = (
+  state: CommandsState,
+  groupIds?: string[],
+): string => {
+  const wanted = new Set(
+    groupIds?.length ? groupIds : state.groups.map((g) => g.id),
+  );
+  // follow links so an exported "Stack" still has its "Backend" and "Frontend"
+  const queue = [...wanted];
+  while (queue.length) {
+    const id = queue.shift();
+    const g = state.groups.find((x) => x.id === id);
+    g?.commands.forEach((c) => {
+      if (c.packageId && !wanted.has(c.packageId)) {
+        wanted.add(c.packageId);
+        queue.push(c.packageId);
+      }
+    });
+  }
+  const groups = state.groups
+    .filter((g) => wanted.has(g.id))
+    .map((g) => ({ ...g, collapsed: false }));
+  return `${JSON.stringify(
+    { stackrun: EXPORT_KIND, version: 1, groups },
+    null,
+    2,
+  )}\n`;
+};
+
+/**
+ * Adds the packages of an exported file. Everything gets new ids (links inside the file
+ * follow), so importing twice or into another machine never clashes.
+ */
+export const importPackages = (
+  state: CommandsState,
+  text: string,
+): { state: CommandsState; added: string[] } => {
+  let raw: any;
+  try {
+    raw = JSON.parse(text);
+  } catch (e) {
+    throw new Error('Not a JSON file');
+  }
+  const list = Array.isArray(raw) ? raw : raw?.groups;
+  if (!Array.isArray(list) || (raw?.stackrun && raw.stackrun !== EXPORT_KIND))
+    throw new Error('No command packages in it');
+  const parsed = parseState(JSON.stringify({ groups: list }));
+  // parseState falls back to a default package for an empty / broken list
+  if (
+    !list.length ||
+    (parsed.groups.length === 1 && parsed.groups[0].id === 'g-default')
+  )
+    throw new Error('No command packages in it');
+  const ids = new Map(parsed.groups.map((g) => [g.id, newId('g')]));
+  const taken = new Set(state.groups.map((g) => g.name));
+  const added = parsed.groups.map((g) => ({
+    ...g,
+    id: ids.get(g.id)!,
+    name: taken.has(g.name) ? `${g.name} (imported)` : g.name,
+    commands: g.commands.map((c) => ({
+      ...c,
+      id: newId('c'),
+      ...(c.packageId && { packageId: ids.get(c.packageId) || c.packageId }),
+    })),
+  }));
+  // a fresh, still empty default package makes way for what is imported
+  const keep = state.groups.filter(
+    (g) => !(g.id === 'g-default' && g.commands.length === 0),
+  );
+  return {
+    state: { groups: [...keep, ...added] },
+    added: added.map((g) => g.name),
+  };
+};

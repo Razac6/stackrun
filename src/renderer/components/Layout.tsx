@@ -18,6 +18,7 @@ import {
 } from '@mui/material';
 import TerminalIcon from '@mui/icons-material/TerminalOutlined';
 import HttpClientIcon from '@mui/icons-material/SendOutlined';
+import SqlClientIcon from '@mui/icons-material/StorageOutlined';
 import DockerIcon from '@mui/icons-material/ViewInArOutlined';
 import NotesIcon from '@mui/icons-material/DescriptionOutlined';
 import CompareIcon from '@mui/icons-material/DifferenceOutlined';
@@ -34,9 +35,13 @@ import type { RunSnapshot } from '../../main/commandRunner';
 
 export type Page = Mode | 'settings';
 
+/** The orange ">" of "Stackrun>" (and of the app icon). */
+export const BRAND_ORANGE = '#ff8a00';
+
 export const MENU: { mode: Mode; text: string; icon: React.ReactNode }[] = [
   { mode: 'commands', text: 'Commands', icon: <TerminalIcon /> },
   { mode: 'client', text: 'HTTP Client', icon: <HttpClientIcon /> },
+  { mode: 'sql', text: 'SQL Client', icon: <SqlClientIcon /> },
   { mode: 'docker', text: 'Docker', icon: <DockerIcon /> },
   { mode: 'notes', text: 'Notes', icon: <NotesIcon /> },
   { mode: 'compare', text: 'JSON compare', icon: <CompareIcon /> },
@@ -171,6 +176,9 @@ export default function Layout({
               noWrap
             >
               Stackrun
+              <Box component="span" sx={{ color: BRAND_ORANGE, ml: 0.25 }}>
+                &gt;
+              </Box>
             </Typography>
           )}
           <IconButton

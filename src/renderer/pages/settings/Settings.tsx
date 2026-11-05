@@ -26,6 +26,11 @@ import { lumaDefaults } from '../../themes/luma';
 import BottomToast from '../notes/BottomToast';
 
 export const THEME_KEY = 'ui_theme';
+export const THEMES = ['luma', 'luma-dark', 'system', 'classic'] as const;
+export type ThemeChoice = (typeof THEMES)[number];
+/** What is stored → a known choice (Luma unless something else was picked). */
+export const themeChoice = (value: unknown): ThemeChoice =>
+  THEMES.includes(value as ThemeChoice) ? (value as ThemeChoice) : 'luma';
 
 type Settings = Record<string, string | undefined>;
 
@@ -107,9 +112,9 @@ export default function SettingsPage({
       .catch(() => {});
   }, []);
 
-  const theme = settings[THEME_KEY] === 'classic' ? 'classic' : 'luma';
+  const theme = themeChoice(settings[THEME_KEY]);
   const notify = readNotifySettings(settings);
-  const colors = getLumaColors(settings);
+  const colors = getLumaColors(settings, theme === 'luma-dark');
   const setNotify = (key: keyof NotifySettings, on: boolean) =>
     onChange(NOTIFY_KEYS[key], String(on));
 
@@ -139,9 +144,20 @@ export default function SettingsPage({
             aria-label="Theme"
           >
             <ToggleButton value="luma">Luma</ToggleButton>
+            <ToggleButton value="luma-dark">Luma Dark</ToggleButton>
+            <ToggleButton value="system">Like the system</ToggleButton>
             <ToggleButton value="classic">Classic</ToggleButton>
           </ToggleButtonGroup>
-          {theme === 'luma' && (
+          {theme === 'system' && (
+            <Typography
+              variant="caption"
+              color="text.secondary"
+              sx={{ display: 'block', mt: 1 }}
+            >
+              Luma or Luma Dark, following your system&apos;s light / dark mode.
+            </Typography>
+          )}
+          {theme !== 'classic' && (
             <Stack direction="row" spacing={3} sx={{ mt: 2 }}>
               {(
                 [
@@ -243,7 +259,13 @@ export default function SettingsPage({
 
         <Section title="About">
           <Typography variant="body2">
-            Stackrun {info?.version ? `v${info.version}` : ''}
+            <Box component="span" sx={{ fontWeight: 700 }}>
+              Stackrun
+              <Box component="span" sx={{ color: '#ff8a00', ml: 0.25 }}>
+                &gt;
+              </Box>
+            </Box>{' '}
+            {info?.version ? `v${info.version}` : ''}
           </Typography>
           <Typography
             variant="caption"

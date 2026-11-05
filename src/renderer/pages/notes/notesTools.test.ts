@@ -307,19 +307,44 @@ describe('sqlTools', () => {
         '  ON u.id = t.id',
         "  AND u.x = 'and from'",
         'WHERE a > 1',
-        'GROUP BY',
-        '  a',
+        // a one-item list stays next to its keyword
+        'GROUP BY a',
       ].join('\n'),
     );
   });
 
+  it('keeps short statements on one line', () => {
+    expect(formatSql('select * from app_reports limit 100;')).toBe(
+      'SELECT * FROM app_reports LIMIT 100;',
+    );
+    expect(
+      formatSql(
+        "delete from t where id in (select id from x where n = 'it''s')",
+      ),
+    ).toBe("DELETE FROM t WHERE id IN (SELECT id FROM x WHERE n = 'it''s')");
+  });
+
   it('keeps IN ( spaced, nests subqueries, escapes quotes', () => {
     const out = formatSql(
-      "delete from t where id in (select id from x where n = 'it''s')",
+      "delete from orders where customer_id in (select id from customers where note = 'it''s' and created_at < now() - interval '1 year')",
     );
-    expect(out).toContain('DELETE FROM t');
-    expect(out).toContain('WHERE id IN (');
-    expect(out).toContain("WHERE n = 'it''s')");
+    expect(out).toContain('DELETE FROM orders');
+    expect(out).toContain('WHERE customer_id IN (');
+    // a subquery is indented and closes on its own line
+    expect(out).toContain("  WHERE note = 'it''s'");
+    expect(out).toContain("INTERVAL '1 year'\n)");
+  });
+
+  it('understands Postgres: operators, casts, arrays, $$ bodies, upserts', () => {
+    const out = formatSql(
+      "select a.data->>'name' as n, count(*) filter (where e.w > 0) from egg e join animal a on a.id = e.a where tags @> array['x']::text[] and id = any($1::uuid[]) group by a.data; insert into egg (id) values (1) on conflict (id) do update set id = excluded.id; create function f() returns trigger as $$ begin return new; end; $$ language plpgsql;",
+    );
+    expect(out).toContain("a.data ->> 'name' AS n");
+    expect(out).toContain('COUNT(*) FILTER (WHERE e.w > 0)');
+    expect(out).toContain("tags @> ARRAY['x']::TEXT[]");
+    expect(out).toContain('ANY($1::UUID[])');
+    expect(out).toContain('ON CONFLICT (id) DO UPDATE');
+    expect(out).toContain('$$ begin return new; end; $$');
   });
 
   it('minifies to one line', () => {

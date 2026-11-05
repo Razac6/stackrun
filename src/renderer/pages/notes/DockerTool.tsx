@@ -42,6 +42,7 @@ import { MONO_FONT } from './highlight';
 import BottomToast from './BottomToast';
 import useCopy from './useCopy';
 import { RemoveContainerDialog, VolumesView } from './DockerVolumes';
+import DockerfileDialog from './DockerfileDialog';
 import ResetDbDialog from './ResetDbDialog';
 import type { DockerStatus } from '../../../main/docker';
 import { RESETTABLE } from '../../../main/dockerTools';
@@ -493,6 +494,7 @@ export default function DockerTool() {
   const [removing, setRemoving] = useState<DockerContainer | null>(null);
   const [resetting, setResetting] = useState<DockerContainer | null>(null);
   const [volumesKey, setVolumesKey] = useState(0);
+  const [fromDockerfile, setFromDockerfile] = useState(false);
   const { copy, copied } = useCopy();
   const engineUp = useRef(false);
 
@@ -766,6 +768,14 @@ export default function DockerTool() {
             )}
           </>
         )}
+        <DockerfileDialog
+          open={fromDockerfile}
+          onClose={() => setFromDockerfile(false)}
+          onStarted={(name) => {
+            flash(`${name} is running`);
+            refreshAll();
+          }}
+        />
         <BottomToast
           text={message?.text || null}
           error={message?.error}
@@ -820,6 +830,15 @@ export default function DockerTool() {
                 )}
               </>
             )}
+          <Tooltip title="Build an image from a Dockerfile and start a container of it">
+            <Button
+              size="small"
+              variant="outlined"
+              onClick={() => setFromDockerfile(true)}
+            >
+              From Dockerfile
+            </Button>
+          </Tooltip>
           <Tooltip title="Refresh">
             <span>
               <IconButton

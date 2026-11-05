@@ -19,9 +19,16 @@ export interface KV {
   enabled: boolean;
 }
 
-export type AuthType = 'inherit' | 'none' | 'bearer' | 'basic' | 'apikey';
+export type AuthType =
+  | 'inherit'
+  | 'none'
+  | 'bearer'
+  | 'basic'
+  | 'apikey'
+  | 'oauth2';
 export interface Auth {
   type: AuthType;
+  authId?: string; // oauth2: which configuration of the environment
   token?: string; // bearer
   username?: string; // basic
   password?: string;
@@ -62,16 +69,39 @@ export interface HttpCollection {
   id: string;
   name: string;
   requests: HttpRequest[];
+  variables: KV[]; // `@name = value` of its .http file
   auth: Auth; // what "inherit" means for its requests
   headers: KV[]; // added to each of its requests
   stopOnError: boolean; // a collection run stops at a failed request
   collapsed?: boolean;
 }
 
+/** OAuth 2.0 configuration - `Security.Auth.<id>` in WebStorm's http-client.env.json. */
+export type OAuthGrant =
+  | 'client_credentials'
+  | 'password'
+  | 'authorization_code';
+export interface OAuthConfig {
+  id: string; // used as {{$auth.token("id")}}
+  grant: OAuthGrant;
+  tokenUrl: string;
+  authUrl: string;
+  redirectUrl: string;
+  clientId: string;
+  clientSecret: string;
+  clientAuth: 'body' | 'basic' | 'none';
+  scope: string;
+  username: string;
+  password: string;
+  pkce: boolean;
+  audience: string;
+}
+
 export interface HttpEnvironment {
   id: string;
   name: string;
   variables: KV[];
+  auths: OAuthConfig[];
 }
 
 export interface HttpState {
@@ -120,6 +150,7 @@ export const newCollection = (
   id: newId('c'),
   name: 'New collection',
   requests: [],
+  variables: [],
   auth: { type: 'none' },
   headers: [],
   stopOnError: true,
@@ -133,6 +164,7 @@ export const emptyState = (): HttpState => ({
       id: 'env-local',
       name: 'local',
       variables: [kv('host', 'http://localhost:3000')],
+      auths: [],
     },
   ],
   activeEnv: 'env-local',
@@ -151,11 +183,19 @@ const asKVs = (v: any): KV[] =>
         )
     : [];
 
-const AUTH_TYPES: AuthType[] = ['inherit', 'none', 'bearer', 'basic', 'apikey'];
+const AUTH_TYPES: AuthType[] = [
+  'inherit',
+  'none',
+  'bearer',
+  'basic',
+  'apikey',
+  'oauth2',
+];
 const asAuth = (a: any, fallback: AuthType): Auth => {
   const type = AUTH_TYPES.includes(a?.type) ? a.type : fallback;
   return {
     type,
+    authId: a?.authId ? String(a.authId) : undefined,
     token: a?.token ? String(a.token) : undefined,
     username: a?.username ? String(a.username) : undefined,
     password: a?.password ? String(a.password) : undefined,
@@ -164,6 +204,46 @@ const asAuth = (a: any, fallback: AuthType): Auth => {
     in: a?.in === 'query' ? 'query' : 'header',
   };
 };
+
+const GRANTS: OAuthGrant[] = [
+  'client_credentials',
+  'password',
+  'authorization_code',
+];
+export const newOAuth = (partial: Partial<OAuthConfig> = {}): OAuthConfig => ({
+  id: 'auth',
+  grant: 'client_credentials',
+  tokenUrl: '',
+  authUrl: '',
+  redirectUrl: '',
+  clientId: '',
+  clientSecret: '',
+  clientAuth: 'body',
+  scope: '',
+  username: '',
+  password: '',
+  pkce: false,
+  audience: '',
+  ...partial,
+});
+const asOAuth = (a: any): OAuthConfig =>
+  newOAuth({
+    id: String(a?.id || 'auth'),
+    grant: GRANTS.includes(a?.grant) ? a.grant : 'client_credentials',
+    tokenUrl: String(a?.tokenUrl || ''),
+    authUrl: String(a?.authUrl || ''),
+    redirectUrl: String(a?.redirectUrl || ''),
+    clientId: String(a?.clientId || ''),
+    clientSecret: String(a?.clientSecret || ''),
+    clientAuth: ['body', 'basic', 'none'].includes(a?.clientAuth)
+      ? a.clientAuth
+      : 'body',
+    scope: String(a?.scope || ''),
+    username: String(a?.username || ''),
+    password: String(a?.password || ''),
+    pkce: !!a?.pkce,
+    audience: String(a?.audience || ''),
+  });
 
 const BODY_TYPES: BodyType[] = ['none', 'json', 'text', 'form', 'xml'];
 const asRequest = (r: any): HttpRequest =>
@@ -211,6 +291,7 @@ export const parseState = (raw: unknown): HttpState => {
         id: String(e?.id || newId('e')),
         name: String(e?.name || 'env'),
         variables: asKVs(e?.variables),
+        auths: Array.isArray(e?.auths) ? e.auths.map(asOAuth) : [],
       }))
     : base.environments;
   return {
@@ -222,6 +303,7 @@ export const parseState = (raw: unknown): HttpState => {
             requests: Array.isArray(c?.requests)
               ? c.requests.map(asRequest)
               : [],
+            variables: asKVs(c?.variables),
             auth: asAuth(c?.auth, 'none'),
             headers: asKVs(c?.headers),
             stopOnError: c?.stopOnError !== false,
@@ -252,19 +334,31 @@ export const parseState = (raw: unknown): HttpState => {
 // ---------------- variables ----------------
 const on = (list: KV[]) => list.filter((x) => x.enabled && x.key.trim());
 
-/** Constants < environment < captured: later ones win. */
-export const variablesFor = (state: HttpState): Record<string, string> => {
-  const env = state.environments.find((e) => e.id === state.activeEnv);
+export const activeEnvironment = (state: HttpState) =>
+  state.environments.find((e) => e.id === state.activeEnv) || null;
+
+/** Constants < environment < the collection's @variables < captured: later ones win. */
+export const variablesFor = (
+  state: HttpState,
+  collection: HttpCollection | null = null,
+): Record<string, string> => {
+  const env = activeEnvironment(state);
   const out: Record<string, string> = {};
-  on(state.constants).forEach((x) => {
-    out[x.key.trim()] = x.value;
-  });
-  on(env?.variables || []).forEach((x) => {
-    out[x.key.trim()] = x.value;
-  });
+  [state.constants, env?.variables || [], collection?.variables || []].forEach(
+    (list) =>
+      on(list).forEach((x) => {
+        out[x.key.trim()] = x.value;
+      }),
+  );
   Object.assign(out, state.captured);
   return out;
 };
+
+// {{$auth.token("id")}} / {{$auth.idToken("id")}} are looked up under these keys
+const AUTH_REF = /^\$auth\.(token|idToken)\(\s*["']([^"']+)["']\s*\)$/;
+export const authTokenKey = (id: string, kind: 'token' | 'idToken' = 'token') =>
+  `$auth.${kind}:${id}`;
+export const authTokenRef = (id: string) => `{{$auth.token("${id}")}}`;
 
 const DYNAMIC: Record<string, () => string> = {
   $uuid: () =>
@@ -285,18 +379,65 @@ export const fill = (
   missing?: Set<string>,
   depth = 0,
 ): string =>
-  String(text ?? '').replace(
-    /\{\{\s*([$\w.-]+)\s*\}\}/g,
-    (all, name: string) => {
-      if (name in vars)
-        return depth < 5
-          ? fill(vars[name], vars, missing, depth + 1)
-          : vars[name];
-      if (DYNAMIC[name]) return DYNAMIC[name]();
-      missing?.add(name);
-      return all;
-    },
-  );
+  String(text ?? '').replace(/\{\{\s*([^{}]+?)\s*\}\}/g, (all, raw: string) => {
+    const ref = AUTH_REF.exec(raw);
+    const name = ref
+      ? authTokenKey(ref[2], ref[1] as 'token' | 'idToken')
+      : raw;
+    if (name in vars)
+      return depth < 5
+        ? fill(vars[name], vars, missing, depth + 1)
+        : vars[name];
+    if (DYNAMIC[name]) return DYNAMIC[name]();
+    missing?.add(raw);
+    return all;
+  });
+
+/** OAuth configurations a request uses (its auth, or {{$auth.token("id")}} anywhere). */
+export const authIdsUsed = (
+  req: HttpRequest,
+  collection: HttpCollection | null,
+): string[] => {
+  const ids = new Set<string>();
+  const auth = effectiveAuth(req, collection);
+  if (auth.type === 'oauth2' && auth.authId) ids.add(auth.authId);
+  const text = [
+    req.url,
+    ...req.params.map((p) => p.value),
+    ...req.headers.map((h) => h.value),
+    ...(collection?.headers || []).map((h) => h.value),
+    req.body.text,
+    ...req.body.form.map((p) => p.value),
+    auth.token || '',
+    auth.value || '',
+  ].join('\n');
+  [
+    ...text.matchAll(
+      /\{\{\s*\$auth\.(?:token|idToken)\(\s*["']([^"']+)["']\s*\)\s*\}\}/g,
+    ),
+  ].forEach((m) => ids.add(m[1]));
+  return [...ids];
+};
+
+/** The configuration with its {{variables}} filled, ready to ask for a token. */
+export const resolveOAuth = (
+  config: OAuthConfig,
+  vars: Record<string, string>,
+): OAuthConfig => {
+  const f = (v: string) => fill(v, vars);
+  return {
+    ...config,
+    tokenUrl: f(config.tokenUrl),
+    authUrl: f(config.authUrl),
+    redirectUrl: f(config.redirectUrl),
+    clientId: f(config.clientId),
+    clientSecret: f(config.clientSecret),
+    scope: f(config.scope),
+    username: f(config.username),
+    password: f(config.password),
+    audience: f(config.audience),
+  };
+};
 
 /** Names used in a request that have no value (to warn before sending). */
 export const missingVariables = (
@@ -350,6 +491,8 @@ export const buildRequest = (
     headers.some(([k]) => k.toLowerCase() === name.toLowerCase());
 
   const auth = effectiveAuth(req, collection);
+  if (auth.type === 'oauth2' && auth.authId && !has('authorization'))
+    headers.push(['Authorization', `Bearer ${f(authTokenRef(auth.authId))}`]);
   if (auth.type === 'bearer' && auth.token && !has('authorization'))
     headers.push(['Authorization', `Bearer ${f(auth.token)}`]);
   if (auth.type === 'basic' && !has('authorization'))
@@ -538,6 +681,8 @@ export const moveRequest = (
 
 // ---------------- .http files (WebStorm / IntelliJ HTTP Client) ----------------
 const authHeaderLine = (auth: Auth): string | null => {
+  if (auth.type === 'oauth2' && auth.authId)
+    return `Authorization: Bearer ${authTokenRef(auth.authId)}`;
   if (auth.type === 'bearer' && auth.token)
     return `Authorization: Bearer ${auth.token}`;
   if (auth.type === 'basic')
@@ -612,14 +757,30 @@ export const requestToHttp = (
   return lines.join('\n');
 };
 
-export const collectionToHttp = (collection: HttpCollection) =>
-  `${collection.requests.map((r) => requestToHttp(r, collection)).join('\n\n')}\n`;
+export const collectionToHttp = (collection: HttpCollection) => {
+  const vars = on(collection.variables).map((v) => `@${v.key} = ${v.value}`);
+  const requests = collection.requests
+    .map((r) => requestToHttp(r, collection))
+    .join('\n\n');
+  return `${vars.length ? `${vars.join('\n')}\n\n` : ''}${requests}\n`;
+};
 
 const CAPTURE_RE =
   /client\.global\.set\(\s*["']([\w.-]+)["']\s*,\s*response\.(body((?:\.[\w$]+|\[\d+\]|\[["'][^"']+["']\])*)|status|headers\.valueOf\(\s*["']([^"']+)["']\s*\))\s*\)/g;
 
-/** Reads a .http file into requests (### separated; `> {% client.global.set %}` → captures). */
-export const parseHttpFile = (text: string): HttpRequest[] => {
+/**
+ * Reads a .http file: requests (### separated; `> {% client.global.set %}` → captures)
+ * and its `@name = value` variables.
+ */
+export const parseHttpFileFull = (
+  text: string,
+): { requests: HttpRequest[]; variables: KV[] } => {
+  const variables: KV[] = [];
+  const setVar = (key: string, value: string) => {
+    const at = variables.findIndex((v) => v.key === key);
+    if (at >= 0) variables[at] = kv(key, value);
+    else variables.push(kv(key, value));
+  };
   const blocks = String(text || '')
     .replace(/\r\n/g, '\n')
     .split(/^###.*$/m)
@@ -640,10 +801,15 @@ export const parseHttpFile = (text: string): HttpRequest[] => {
     let delayMs = 0;
     let nameTag = '';
     let k = 0;
-    // leading comments / blank lines; `# @name x`, `# @delay 500`
+    // leading comments / blank lines; `# @name x`, `# @delay 500`, `@host = …`
     for (; k < lines.length; k += 1) {
       const l = lines[k].trim();
       if (!l) continue; // eslint-disable-line no-continue
+      const fileVar = /^@([\w.-]+)\s*=\s*(.*)$/.exec(l);
+      if (fileVar) {
+        setVar(fileVar[1], fileVar[2].trim());
+        continue; // eslint-disable-line no-continue
+      }
       const tag = /^(?:#|\/\/)\s*@(\w+)\s*(.*)$/.exec(l);
       if (tag) {
         if (tag[1] === 'name') nameTag = tag[2].trim();
@@ -675,6 +841,8 @@ export const parseHttpFile = (text: string): HttpRequest[] => {
     }
     const rawBody = lines
       .slice(k + 1)
+      // `<> ./previous-response.json` and `> ./handler.js` are not part of the body
+      .filter((l) => !/^\s*(<>|>)\s+\S/.test(l))
       .join('\n')
       .trim();
     const ctype =
@@ -710,12 +878,17 @@ export const parseHttpFile = (text: string): HttpRequest[] => {
     const authAt = headers.findIndex((h) => /^authorization$/i.test(h.key));
     if (authAt >= 0) {
       const v = headers[authAt].value;
+      const oauth =
+        /^Bearer\s+\{\{\s*\$auth\.token\(\s*["']([^"']+)["']\s*\)\s*\}\}$/i.exec(
+          v,
+        );
       const bearer = /^Bearer\s+(.+)$/i.exec(v);
       const basic = /^Basic\s+(\S+)\s+(\S+)$/i.exec(v);
-      if (bearer) auth = { type: 'bearer', token: bearer[1] };
+      if (oauth) auth = { type: 'oauth2', authId: oauth[1] };
+      else if (bearer) auth = { type: 'bearer', token: bearer[1] };
       else if (basic)
         auth = { type: 'basic', username: basic[1], password: basic[2] };
-      if (bearer || basic) headers.splice(authAt, 1);
+      if (oauth || bearer || basic) headers.splice(authAt, 1);
     }
     const captures: Capture[] = [];
     [...script.matchAll(CAPTURE_RE)].forEach((m) => {
@@ -764,50 +937,263 @@ export const parseHttpFile = (text: string): HttpRequest[] => {
       }),
     );
   });
+  return { requests: out, variables };
+};
+
+export const parseHttpFile = (text: string): HttpRequest[] =>
+  parseHttpFileFull(text).requests;
+
+// ---------------- http-client.env.json ----------------
+// WebStorm: { "$shared": {…}, "dev": { "host": "…", "Security": { "Auth": { "id": {
+//   "Type": "OAuth2", "Grant Type": "Client Credentials", "Client ID": "…", … } } } } }
+// http-client.private.env.json has the same shape (secrets) and is merged into it.
+
+const GRANT_NAMES: Record<string, OAuthGrant> = {
+  'client credentials': 'client_credentials',
+  client_credentials: 'client_credentials',
+  password: 'password',
+  'authorization code': 'authorization_code',
+  authorization_code: 'authorization_code',
+};
+const GRANT_LABELS: Record<OAuthGrant, string> = {
+  client_credentials: 'Client Credentials',
+  password: 'Password',
+  authorization_code: 'Authorization Code',
+};
+
+const pick = (o: Record<string, unknown>, ...names: string[]) => {
+  const keys = Object.keys(o);
+  // eslint-disable-next-line no-restricted-syntax
+  for (const n of names) {
+    const k = keys.find((x) => x.toLowerCase() === n.toLowerCase());
+    if (k !== undefined && o[k] !== undefined && o[k] !== null) return o[k];
+  }
+  return undefined;
+};
+const str = (v: unknown) => (v === undefined ? '' : String(v));
+
+const oauthFromJetBrains = (
+  id: string,
+  raw: Record<string, unknown>,
+): OAuthConfig | null => {
+  const type = str(pick(raw, 'Type')).toLowerCase();
+  if (type && type !== 'oauth2') return null;
+  const grant =
+    GRANT_NAMES[str(pick(raw, 'Grant Type')).toLowerCase()] ||
+    'client_credentials';
+  const clientCreds = str(pick(raw, 'Client Credentials')).toLowerCase();
+  const pkce = pick(raw, 'PKCE');
+  return newOAuth({
+    id,
+    grant,
+    tokenUrl: str(pick(raw, 'Token URL')),
+    authUrl: str(pick(raw, 'Auth URL')),
+    redirectUrl: str(pick(raw, 'Redirect URL')),
+    clientId: str(pick(raw, 'Client ID')),
+    clientSecret: str(pick(raw, 'Client Secret')),
+    clientAuth:
+      clientCreds === 'basic'
+        ? 'basic'
+        : clientCreds === 'none'
+          ? 'none'
+          : 'body',
+    scope: str(pick(raw, 'Scope')),
+    username: str(pick(raw, 'Username')),
+    password: str(pick(raw, 'Password')),
+    pkce: pkce === true || (typeof pkce === 'object' && pkce !== null),
+    audience: str(pick(raw, 'Audience')),
+  });
+};
+
+const oauthToJetBrains = (a: OAuthConfig) => {
+  const out: Record<string, unknown> = {
+    Type: 'OAuth2',
+    'Grant Type': GRANT_LABELS[a.grant],
+    'Client ID': a.clientId,
+  };
+  if (a.clientSecret) out['Client Secret'] = a.clientSecret;
+  if (a.clientAuth !== 'body') out['Client Credentials'] = a.clientAuth;
+  if (a.tokenUrl) out['Token URL'] = a.tokenUrl;
+  if (a.authUrl) out['Auth URL'] = a.authUrl;
+  if (a.redirectUrl) out['Redirect URL'] = a.redirectUrl;
+  if (a.scope) out.Scope = a.scope;
+  if (a.username) out.Username = a.username;
+  if (a.password) out.Password = a.password;
+  if (a.audience) out.Audience = a.audience;
+  if (a.pkce) out.PKCE = true;
   return out;
 };
 
-// ---------------- http-client.env.json ----------------
-/** `{ "dev": { "host": "…" }, "prod": {…} }` - JetBrains' environment file. */
-export const environmentsToJson = (envs: HttpEnvironment[]) =>
+const asValue = (x: unknown) => (typeof x === 'string' ? x : JSON.stringify(x));
+
+/** Reads an env file: environments (with their auth configurations) and `$shared`. */
+export const readEnvFile = (
+  text: string,
+): { environments: HttpEnvironment[]; shared: KV[] } => {
+  const v = JSON.parse(text);
+  if (!v || typeof v !== 'object' || Array.isArray(v))
+    throw new Error('Expected { "env name": { "variable": "value" } }');
+  let shared: KV[] = [];
+  const environments: HttpEnvironment[] = [];
+  Object.entries(v).forEach(([name, raw]) => {
+    const vars =
+      raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
+    const variables: KV[] = [];
+    const auths: OAuthConfig[] = [];
+    Object.entries(vars).forEach(([k, x]) => {
+      if (k.toLowerCase() === 'security' && x && typeof x === 'object') {
+        const authBlock = pick(x as Record<string, unknown>, 'Auth');
+        if (authBlock && typeof authBlock === 'object')
+          Object.entries(authBlock as Record<string, unknown>).forEach(
+            ([id, conf]) => {
+              const a =
+                conf && typeof conf === 'object'
+                  ? oauthFromJetBrains(id, conf as Record<string, unknown>)
+                  : null;
+              if (a) auths.push(a);
+            },
+          );
+        return;
+      }
+      variables.push(kv(k, asValue(x)));
+    });
+    if (name === '$shared') shared = variables;
+    else environments.push({ id: newId('e'), name, variables, auths });
+  });
+  return { environments, shared };
+};
+
+export const environmentsFromJson = (text: string): HttpEnvironment[] =>
+  readEnvFile(text).environments;
+
+/** WebStorm's format; constants go to `$shared`. */
+export const environmentsToJson = (
+  envs: HttpEnvironment[],
+  shared: KV[] = [],
+) =>
   JSON.stringify(
-    Object.fromEntries(
-      envs.map((e) => [
-        e.name,
-        Object.fromEntries(on(e.variables).map((v) => [v.key, v.value])),
-      ]),
-    ),
+    Object.fromEntries([
+      ...(on(shared).length
+        ? [
+            [
+              '$shared',
+              Object.fromEntries(on(shared).map((v) => [v.key, v.value])),
+            ],
+          ]
+        : []),
+      ...envs.map((e) => {
+        const body: Record<string, unknown> = Object.fromEntries(
+          on(e.variables).map((v) => [v.key, v.value]),
+        );
+        if (e.auths?.length)
+          body.Security = {
+            Auth: Object.fromEntries(
+              e.auths.map((a) => [a.id, oauthToJetBrains(a)]),
+            ),
+          };
+        return [e.name, body];
+      }),
+    ]),
     null,
     2,
   );
 
-export const environmentsFromJson = (text: string): HttpEnvironment[] => {
-  const v = JSON.parse(text);
-  if (!v || typeof v !== 'object' || Array.isArray(v))
-    throw new Error('Expected { "env name": { "variable": "value" } }');
-  return Object.entries(v).map(([name, vars]) => ({
-    id: newId('e'),
-    name,
-    variables:
-      vars && typeof vars === 'object'
-        ? Object.entries(vars as Record<string, unknown>).map(([k, x]) =>
-            kv(k, typeof x === 'string' ? x : JSON.stringify(x)),
-          )
-        : [],
-  }));
+/** Values from `incoming` win; the rest of each list stays (like the private env file). */
+export const mergeKVs = (current: KV[], incoming: KV[]): KV[] => {
+  const out = current.map((c) => incoming.find((x) => x.key === c.key) || c);
+  incoming
+    .filter((x) => !current.some((c) => c.key === x.key))
+    .forEach((x) => out.push(x));
+  return out;
 };
 
-/** Environments read from a file replace same-named ones and add the rest. */
+const mergeAuths = (current: OAuthConfig[], incoming: OAuthConfig[]) => {
+  const out = current.map((c) => {
+    const m = incoming.find((x) => x.id === c.id);
+    if (!m) return c;
+    // the private file often only has the secrets: keep what it leaves empty
+    const merged = { ...c };
+    (Object.keys(m) as (keyof OAuthConfig)[]).forEach((k) => {
+      const val = m[k];
+      if (val !== '' && val !== undefined) (merged as any)[k] = val;
+    });
+    return merged;
+  });
+  incoming
+    .filter((x) => !current.some((c) => c.id === x.id))
+    .forEach((x) => out.push(x));
+  return out;
+};
+
+/** Same-named environments are merged (variables and auth configs), new ones added. */
 export const mergeEnvironments = (
   current: HttpEnvironment[],
   incoming: HttpEnvironment[],
 ): HttpEnvironment[] => {
   const out = current.map((e) => {
     const match = incoming.find((x) => x.name === e.name);
-    return match ? { ...e, variables: match.variables } : e;
+    return match
+      ? {
+          ...e,
+          variables: mergeKVs(e.variables, match.variables),
+          auths: mergeAuths(e.auths || [], match.auths || []),
+        }
+      : e;
   });
   incoming
     .filter((x) => !current.some((e) => e.name === x.name))
     .forEach((x) => out.push(x));
   return out;
+};
+
+// ---------------- the collection as an editable .http file ----------------
+/**
+ * The text shown in the .http editor: its @variables and requests as written, without
+ * the collection's own auth / headers folded in (those stay collection settings).
+ */
+export const collectionToHttpText = (collection: HttpCollection) => {
+  const vars = on(collection.variables).map((v) => `@${v.key} = ${v.value}`);
+  const requests = collection.requests
+    .map((r) => requestToHttp(r, null))
+    .join('\n\n');
+  return `${vars.length ? `${vars.join('\n')}\n\n` : ''}${requests}\n`;
+};
+
+/**
+ * Edited text → the collection: requests keep their ids by position (so responses and
+ * run states stay with them), and what the text cannot hold (skip) is kept too.
+ */
+export const applyHttpText = (
+  collection: HttpCollection,
+  text: string,
+): HttpCollection => {
+  const { requests, variables } = parseHttpFileFull(text);
+  return {
+    ...collection,
+    variables,
+    requests: requests.map((r, i) => {
+      const old = collection.requests[i];
+      return old ? { ...r, id: old.id, skip: old.skip } : r;
+    }),
+  };
+};
+
+/** Which request (by position) the caret is in; null between / before requests. */
+export const requestIndexAt = (text: string, offset: number): number | null => {
+  const src = String(text || '').replace(/\r\n/g, '\n');
+  const starts = [0];
+  const re = /^###.*$/gm;
+  let m = re.exec(src);
+  while (m) {
+    starts.push(m.index);
+    m = re.exec(src);
+  }
+  let count = 0;
+  for (let i = 0; i < starts.length; i += 1) {
+    const end = i + 1 < starts.length ? starts[i + 1] : src.length;
+    const has = parseHttpFile(src.slice(starts[i], end)).length > 0;
+    if (offset >= starts[i] && offset <= end) return has ? count : null;
+    if (has) count += 1;
+  }
+  return null;
 };

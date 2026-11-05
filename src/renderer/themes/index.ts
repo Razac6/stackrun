@@ -1,6 +1,11 @@
 import { Theme, useTheme } from '@mui/material/styles';
 import classicTheme from './classic';
-import lumaTheme, { createLumaTheme, lumaDefaults, LumaColors } from './luma';
+import lumaTheme, {
+  createLumaTheme,
+  lumaDarkDefaults,
+  lumaDefaults,
+  LumaColors,
+} from './luma';
 
 export type ThemeVariant = 'classic' | 'luma';
 
@@ -56,12 +61,16 @@ export const lumaColorSettings: Record<keyof LumaColors, string> = {
 
 export const getLumaColors = (
   settings: Record<string, string | undefined>,
-): LumaColors => ({
-  primary: settings[lumaColorSettings.primary] || lumaDefaults.primary,
-  accent: settings[lumaColorSettings.accent] || lumaDefaults.accent,
-  highlight: settings[lumaColorSettings.highlight] || lumaDefaults.highlight,
-  band: settings[lumaColorSettings.band] || lumaDefaults.band,
-});
+  dark = false,
+): LumaColors => {
+  const d = dark ? lumaDarkDefaults : lumaDefaults;
+  return {
+    primary: settings[lumaColorSettings.primary] || d.primary,
+    accent: settings[lumaColorSettings.accent] || d.accent,
+    highlight: settings[lumaColorSettings.highlight] || d.highlight,
+    band: settings[lumaColorSettings.band] || d.band,
+  };
+};
 
 // The `ui_theme` setting may hold anything (old DBs, manual edits) - fall back to the default.
 export const resolveTheme = (
@@ -69,6 +78,9 @@ export const resolveTheme = (
 ): Theme => {
   if (settings.ui_theme === 'luma') {
     return createLumaTheme(getLumaColors(settings));
+  }
+  if (settings.ui_theme === 'luma-dark') {
+    return createLumaTheme(getLumaColors(settings, true), 'dark');
   }
   return themes[settings.ui_theme as ThemeVariant] ?? themes[DEFAULT_THEME];
 };

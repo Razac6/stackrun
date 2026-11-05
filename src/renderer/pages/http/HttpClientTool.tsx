@@ -37,6 +37,7 @@ import {
   Tooltip,
   Typography,
 } from '@mui/material';
+import NotesIcon from '@mui/icons-material/DescriptionOutlined';
 import AddIcon from '@mui/icons-material/Add';
 import MoreHorizIcon from '@mui/icons-material/MoreHoriz';
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
@@ -51,6 +52,9 @@ import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
 import EditOutlinedIcon from '@mui/icons-material/EditOutlined';
 import TerminalIcon from '@mui/icons-material/Terminal';
+import CodeIcon from '@mui/icons-material/Code';
+import ViewListIcon from '@mui/icons-material/ViewListOutlined';
+import ContentPasteIcon from '@mui/icons-material/ContentPaste';
 import ScheduleIcon from '@mui/icons-material/Schedule';
 import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import ErrorIcon from '@mui/icons-material/Error';
@@ -63,7 +67,18 @@ import {
   buildRequest,
   Capture,
   collectionToHttp,
-  environmentsFromJson,
+  readEnvFile,
+  mergeKVs,
+  authIdsUsed,
+  authTokenKey,
+  resolveOAuth,
+  activeEnvironment,
+  newOAuth,
+  OAuthConfig,
+  parseHttpFileFull,
+  collectionToHttpText,
+  applyHttpText,
+  requestIndexAt,
   environmentsToJson,
   findRequest,
   HttpCollection,
@@ -78,7 +93,6 @@ import {
   newCollection,
   newId,
   newRequest,
-  parseHttpFile,
   parseState,
   removeRequest,
   duplicateRequest,
@@ -90,6 +104,7 @@ import {
   requestToHttp,
 } from './httpModel';
 import KVTable from './KVTable';
+import NotePicker, { noteText } from '../../components/NotePicker';
 import CodeArea from '../notes/CodeArea';
 import JsonFoldView from '../notes/JsonFoldView';
 import BottomToast from '../notes/BottomToast';
@@ -175,10 +190,12 @@ function AuthEditor({
   auth,
   onChange,
   allowInherit,
+  authIds,
 }: {
   auth: Auth;
   onChange: (auth: Auth) => void;
   allowInherit: boolean;
+  authIds: string[]; // OAuth configurations of the active environment
 }) {
   const set = (patch: Partial<Auth>) => onChange({ ...auth, ...patch });
   const mono = { sx: { fontFamily: MONO_FONT, fontSize: 13 } };
@@ -198,7 +215,42 @@ function AuthEditor({
         <MenuItem value="bearer">Bearer token</MenuItem>
         <MenuItem value="basic">Basic (user + password)</MenuItem>
         <MenuItem value="apikey">API key</MenuItem>
+        <MenuItem value="oauth2">OAuth 2.0 (from the environment)</MenuItem>
       </Select>
+      {auth.type === 'oauth2' && (
+        <>
+          <Select
+            size="small"
+            value={auth.authId || ''}
+            displayEmpty
+            onChange={(e) => set({ authId: String(e.target.value) })}
+            inputProps={{ 'aria-label': 'Auth configuration' }}
+            sx={{ width: 260 }}
+          >
+            <MenuItem value="" disabled>
+              Pick a configuration
+            </MenuItem>
+            {[
+              ...new Set([...authIds, ...(auth.authId ? [auth.authId] : [])]),
+            ].map((id) => (
+              <MenuItem key={id} value={id}>
+                {id}
+                {!authIds.includes(id) ? ' (not in this environment)' : ''}
+              </MenuItem>
+            ))}
+          </Select>
+          <Typography variant="body2" color="text.secondary">
+            Sends{' '}
+            <code>
+              Authorization: Bearer {'{{$auth.token("'}
+              {auth.authId || 'id'}
+              {'")}}'}
+            </code>
+            . The token is fetched before the request and reused until it
+            expires. Configurations: Environments → Auth.
+          </Typography>
+        </>
+      )}
       {auth.type === 'bearer' && (
         <TextField
           size="small"
@@ -343,18 +395,182 @@ function CapturesEditor({
   );
 }
 
+function OAuthEditor({
+  config,
+  onChange,
+  onRemove,
+  onTest,
+}: {
+  config: OAuthConfig;
+  onChange: (c: OAuthConfig) => void;
+  onRemove: () => void;
+  onTest: () => void;
+}) {
+  const set = (patch: Partial<OAuthConfig>) =>
+    onChange({ ...config, ...patch });
+  const field = (
+    key: keyof OAuthConfig,
+    label: string,
+    extra: { type?: string; placeholder?: string } = {},
+  ) => (
+    <TextField
+      size="small"
+      label={label}
+      value={String(config[key] ?? '')}
+      onChange={(e) => set({ [key]: e.target.value } as Partial<OAuthConfig>)}
+      type={extra.type}
+      placeholder={extra.placeholder}
+      InputProps={{ sx: { fontFamily: MONO_FONT, fontSize: 13 } }}
+      fullWidth
+    />
+  );
+  const code = config.grant === 'authorization_code';
+  return (
+    <Paper variant="outlined" sx={{ p: 1.5, mb: 1.5 }}>
+      <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1.5 }}>
+        <TextField
+          size="small"
+          label="Id"
+          value={config.id}
+          onChange={(e) => set({ id: e.target.value.trim() })}
+          sx={{ width: 180 }}
+          InputProps={{ sx: { fontFamily: MONO_FONT, fontSize: 13 } }}
+        />
+        <Select
+          size="small"
+          value={config.grant}
+          onChange={(e) =>
+            set({ grant: e.target.value as OAuthConfig['grant'] })
+          }
+          inputProps={{ 'aria-label': 'Grant type' }}
+          sx={{ width: 220 }}
+        >
+          <MenuItem value="client_credentials">Client Credentials</MenuItem>
+          <MenuItem value="password">Password</MenuItem>
+          <MenuItem value="authorization_code">Authorization Code</MenuItem>
+        </Select>
+        <Box sx={{ flex: 1 }} />
+        <Button size="small" onClick={onTest}>
+          Get token
+        </Button>
+        <IconButton
+          size="small"
+          onClick={onRemove}
+          aria-label={`Remove ${config.id}`}
+        >
+          <DeleteOutlineIcon fontSize="small" />
+        </IconButton>
+      </Stack>
+      <Box sx={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 1 }}>
+        {field('tokenUrl', 'Token URL', {
+          placeholder: '{{host}}/oauth/token',
+        })}
+        {field('scope', 'Scope')}
+        {field('clientId', 'Client ID')}
+        {field('clientSecret', 'Client Secret', { type: 'password' })}
+        {config.grant === 'password' && field('username', 'Username')}
+        {config.grant === 'password' &&
+          field('password', 'Password', { type: 'password' })}
+        {code && field('authUrl', 'Auth URL')}
+        {code &&
+          field('redirectUrl', 'Redirect URL', {
+            placeholder: 'http://localhost/callback',
+          })}
+        {field('audience', 'Audience (optional)')}
+        <Select
+          size="small"
+          value={config.clientAuth}
+          onChange={(e) =>
+            set({ clientAuth: e.target.value as OAuthConfig['clientAuth'] })
+          }
+          inputProps={{ 'aria-label': 'Client credentials' }}
+        >
+          <MenuItem value="body">Client secret in the body</MenuItem>
+          <MenuItem value="basic">Client secret as Basic auth</MenuItem>
+          <MenuItem value="none">No client secret</MenuItem>
+        </Select>
+      </Box>
+      {code && (
+        <FormControlLabel
+          sx={{ mt: 1 }}
+          control={
+            <Switch
+              size="small"
+              checked={config.pkce}
+              onChange={(e) => set({ pkce: e.target.checked })}
+            />
+          }
+          label="PKCE"
+        />
+      )}
+      <Typography
+        variant="caption"
+        color="text.secondary"
+        sx={{ display: 'block', mt: 1 }}
+      >
+        Fields can use {'{{variables}}'} of the environment.
+        {code ? ' A sign-in window opens when a token is needed.' : ''}
+      </Typography>
+    </Paper>
+  );
+}
+
 function EnvironmentsDialog({
   open,
   state,
   onChange,
   onClose,
+  onTestAuth,
 }: {
   open: boolean;
   state: HttpState;
   onChange: (s: HttpState) => void;
   onClose: () => void;
+  onTestAuth: (env: HttpEnvironment, config: OAuthConfig) => void;
 }) {
   const [tab, setTab] = useState<string>('constants');
+  // env.json as text: paste WebStorm's http-client.env.json (and .private) here
+  const [envText, setEnvText] = useState('');
+  const openJson = () => {
+    setEnvText(environmentsToJson(state.environments, state.constants));
+    setTab('json');
+  };
+  let envPreview: ReturnType<typeof readEnvFile> | null = null;
+  let envError = '';
+  if (tab === 'json' && envText.trim()) {
+    try {
+      envPreview = readEnvFile(envText);
+    } catch (e: any) {
+      envError = e?.message || String(e);
+    }
+  }
+  const applyJson = (replace: boolean) => {
+    if (!envPreview) return;
+    const { environments, shared } = envPreview;
+    if (replace) {
+      const activeName = state.environments.find(
+        (e) => e.id === state.activeEnv,
+      )?.name;
+      onChange({
+        ...state,
+        environments,
+        constants: shared,
+        activeEnv:
+          environments.find((e) => e.name === activeName)?.id ||
+          environments[0]?.id ||
+          null,
+      });
+    } else {
+      const merged = mergeEnvironments(state.environments, environments);
+      onChange({
+        ...state,
+        environments: merged,
+        constants: mergeKVs(state.constants, shared),
+        activeEnv: state.activeEnv || merged[0]?.id || null,
+      });
+    }
+    setTab('constants');
+  };
   const env = state.environments.find((e) => e.id === tab);
   const setEnv = (id: string, patch: Partial<HttpEnvironment>) =>
     onChange({
@@ -368,6 +584,7 @@ function EnvironmentsDialog({
       id: newId('e'),
       name: `env ${state.environments.length + 1}`,
       variables: [],
+      auths: [],
     };
     onChange({
       ...state,
@@ -394,6 +611,7 @@ function EnvironmentsDialog({
             ))}
             <Tab value="captured" label={`Captured (${captured.length})`} />
             <Tab value="options" label="Options" />
+            <Tab value="json" label="env.json" onClick={openJson} />
           </Tabs>
           <Button size="small" startIcon={<AddIcon />} onClick={addEnv}>
             Environment
@@ -457,6 +675,50 @@ function EnvironmentsDialog({
               onChange={(rows) => setEnv(env.id, { variables: rows })}
               secretKeys={/pass|secret|token|key/i}
             />
+            <Box sx={{ display: 'flex', alignItems: 'center', mt: 3, mb: 1 }}>
+              <Typography variant="subtitle2" sx={{ flex: 1 }}>
+                Auth (OAuth 2.0) - WebStorm&apos;s Security.Auth, used as{' '}
+                <code>{'{{$auth.token("id")}}'}</code>
+              </Typography>
+              <Button
+                size="small"
+                startIcon={<AddIcon />}
+                onClick={() =>
+                  setEnv(env.id, {
+                    auths: [
+                      ...env.auths,
+                      newOAuth({ id: `auth${env.auths.length + 1}` }),
+                    ],
+                  })
+                }
+              >
+                Configuration
+              </Button>
+            </Box>
+            {env.auths.length === 0 && (
+              <Typography variant="body2" color="text.secondary">
+                None. Import http-client.env.json with a Security section, or
+                add one.
+              </Typography>
+            )}
+            {env.auths.map((a, i) => (
+              <OAuthEditor
+                // eslint-disable-next-line react/no-array-index-key
+                key={i}
+                config={a}
+                onChange={(next) =>
+                  setEnv(env.id, {
+                    auths: env.auths.map((x, j) => (j === i ? next : x)),
+                  })
+                }
+                onRemove={() =>
+                  setEnv(env.id, {
+                    auths: env.auths.filter((_, j) => j !== i),
+                  })
+                }
+                onTest={() => onTestAuth(env, a)}
+              />
+            ))}
           </>
         )}
         {tab === 'captured' && (
@@ -513,6 +775,133 @@ function EnvironmentsDialog({
               </Button>
             )}
           </>
+        )}
+        {tab === 'json' && (
+          <Box
+            sx={{
+              display: 'grid',
+              gridTemplateColumns: 'minmax(0, 1.4fr) minmax(0, 1fr)',
+              gap: 1.5,
+            }}
+          >
+            <Box>
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+                Paste WebStorm&apos;s http-client.env.json (or the private one)
+                - $shared becomes constants, Security.Auth the auth
+                configurations.
+              </Typography>
+              <CodeArea
+                value={envText}
+                onChange={setEnvText}
+                language="json"
+                minHeight={360}
+                ariaLabel="env.json"
+                placeholder={
+                  '{\n  "$shared": { "version": "v1" },\n  "local": {\n    "host": "http://localhost:3000",\n    "Security": { "Auth": { "my-auth": {\n      "Type": "OAuth2", "Grant Type": "Client Credentials",\n      "Client ID": "app", "Client Secret": "{{secret}}",\n      "Token URL": "{{host}}/oauth/token" } } }\n  }\n}'
+                }
+              />
+            </Box>
+            <Box>
+              <Typography variant="subtitle2" sx={{ mb: 1 }}>
+                Preview
+              </Typography>
+              {envError && (
+                <Alert severity="error" sx={{ mb: 1 }}>
+                  {envError}
+                </Alert>
+              )}
+              {envPreview && (
+                <Stack spacing={1}>
+                  {envPreview.shared.length > 0 && (
+                    <Paper variant="outlined" sx={{ p: 1 }}>
+                      <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                        $shared → constants
+                      </Typography>
+                      <Typography
+                        variant="caption"
+                        color="text.secondary"
+                        sx={{ fontFamily: MONO_FONT }}
+                      >
+                        {envPreview.shared.map((v) => v.key).join(', ')}
+                      </Typography>
+                    </Paper>
+                  )}
+                  {envPreview.environments.map((e) => {
+                    const exists = state.environments.some(
+                      (x) => x.name === e.name,
+                    );
+                    return (
+                      <Paper key={e.id} variant="outlined" sx={{ p: 1 }}>
+                        <Box
+                          sx={{ display: 'flex', alignItems: 'center', gap: 1 }}
+                        >
+                          <Typography
+                            variant="body2"
+                            sx={{ fontWeight: 600, flex: 1 }}
+                          >
+                            {e.name}
+                          </Typography>
+                          <Chip
+                            size="small"
+                            label={exists ? 'merges into' : 'new'}
+                            color={exists ? 'default' : 'success'}
+                            variant="outlined"
+                          />
+                        </Box>
+                        <Typography
+                          variant="caption"
+                          color="text.secondary"
+                          sx={{ display: 'block', fontFamily: MONO_FONT }}
+                        >
+                          {e.variables.length
+                            ? e.variables
+                                .map((v) =>
+                                  /pass|secret|token|key/i.test(v.key)
+                                    ? `${v.key}=••••`
+                                    : `${v.key}=${v.value}`,
+                                )
+                                .join('  ')
+                            : 'no variables'}
+                        </Typography>
+                        {e.auths.map((a) => (
+                          <Chip
+                            key={a.id}
+                            size="small"
+                            sx={{ mt: 0.5, mr: 0.5 }}
+                            label={`auth ${a.id} · ${a.grant.replace('_', ' ')}`}
+                          />
+                        ))}
+                      </Paper>
+                    );
+                  })}
+                  {!envPreview.environments.length &&
+                    !envPreview.shared.length && (
+                      <Typography variant="body2" color="text.secondary">
+                        Nothing in it.
+                      </Typography>
+                    )}
+                  <Stack direction="row" spacing={1}>
+                    <Button
+                      variant="contained"
+                      size="small"
+                      onClick={() => applyJson(false)}
+                    >
+                      Merge
+                    </Button>
+                    <Tooltip title="Environments and constants become exactly this">
+                      <Button
+                        size="small"
+                        color="warning"
+                        onClick={() => applyJson(true)}
+                      >
+                        Replace all
+                      </Button>
+                    </Tooltip>
+                  </Stack>
+                </Stack>
+              )}
+            </Box>
+          </Box>
         )}
         {tab === 'options' && (
           <Stack spacing={1.5}>
@@ -582,6 +971,11 @@ export default function HttpClientTool({
   const [loaded, setLoaded] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
   const [settingsFor, setSettingsFor] = useState<string | null>(null); // collection settings
+  // a collection open as its .http file (WebStorm-style), and the text being edited
+  const [textFor, setTextFor] = useState<string | null>(null);
+  const [draft, setDraft] = useState('');
+  const [textPick, setTextPick] = useState<number | null>(null);
+  const textTimer = useRef<ReturnType<typeof setTimeout>>();
   const [tab, setTab] = useState('params');
   const [resTab, setResTab] = useState('body');
   const [responses, setResponses] = useState<Record<string, Shown>>({});
@@ -592,6 +986,7 @@ export default function HttpClientTool({
   );
   const [envOpen, setEnvOpen] = useState(false);
   const [curlOpen, setCurlOpen] = useState(false);
+  const [bodyFromNote, setBodyFromNote] = useState(false);
   const [curlText, setCurlText] = useState('');
   const [toast, setToast] = useState<{ text: string; error?: boolean } | null>(
     null,
@@ -642,18 +1037,118 @@ export default function HttpClientTool({
   const found = findRequest(state, selected);
   const request = found?.request || null;
   const collection = found?.collection || null;
-  const vars = useMemo(() => variablesFor(state), [state]);
-  const missing = request ? missingVariables(request, collection, vars) : [];
-  const shown = request ? responses[request.id] : undefined;
+  const vars = useMemo(
+    () => variablesFor(state, collection),
+    [state, collection],
+  );
+  const envAuthIds = (activeEnvironment(state)?.auths || []).map((a) => a.id);
+  // tokens are fetched when sending: only an id with no configuration is "missing"
+  const missing = request
+    ? [
+        ...missingVariables(request, collection, vars).filter(
+          (m) => !m.startsWith('$auth.'),
+        ),
+        ...authIdsUsed(request, collection)
+          .filter((id) => !envAuthIds.includes(id))
+          .map((id) => `$auth "${id}"`),
+      ]
+    : [];
   const editReq = (patch: Partial<HttpRequest>) =>
     request && change(updateRequest(state, request.id, patch));
 
   // ---------------- sending ----------------
-  /** Sends one request with the variables as they are now; true when it went fine. */
-  const send = async (req: HttpRequest, col: HttpCollection | null) => {
+  /** OAuth tokens by configuration, reused until they expire (in memory only). */
+  const tokens = useRef<
+    Record<string, { access: string; id: string; until: number }>
+  >({});
+
+  /** Tokens for the configurations a request uses; an error text when one fails. */
+  const tokensFor = async (
+    req: HttpRequest,
+    col: HttpCollection | null,
+    fresh: boolean,
+  ): Promise<{ vars: Record<string, string>; error: string | null }> => {
     const current = stateRef.current;
-    const built = buildRequest(req, col, variablesFor(current));
+    const env = activeEnvironment(current);
+    const base = variablesFor(current, col);
+    const out: Record<string, string> = {};
+    // eslint-disable-next-line no-restricted-syntax
+    for (const id of authIdsUsed(req, col)) {
+      const config = env?.auths.find((a) => a.id === id);
+      if (!config)
+        return {
+          vars: out,
+          error: `No auth configuration "${id}" in ${env ? `environment "${env.name}"` : 'any environment'} (Environments → Auth)`,
+        };
+      const key = `${env!.id}:${id}`;
+      const cached = tokens.current[key];
+      if (!fresh && cached && cached.until > Date.now()) {
+        out[authTokenKey(id)] = cached.access;
+        out[authTokenKey(id, 'idToken')] = cached.id;
+        // eslint-disable-next-line no-continue
+        continue;
+      }
+      // eslint-disable-next-line no-await-in-loop
+      const t = await window.electron.oauth.token({
+        ...resolveOAuth(config, base),
+        insecure: current.options.insecure,
+      });
+      if (t.error) return { vars: out, error: `Auth "${id}": ${t.error}` };
+      tokens.current[key] = {
+        access: t.accessToken,
+        id: t.idToken,
+        // a little before it really expires; unknown = 50 min
+        until: Date.now() + Math.max(30, (t.expiresIn || 3000) - 30) * 1000,
+      };
+      out[authTokenKey(id)] = t.accessToken;
+      out[authTokenKey(id, 'idToken')] = t.idToken;
+    }
+    return { vars: out, error: null };
+  };
+
+  const authFailure = (req: HttpRequest, error: string): HttpResult => ({
+    id: req.id,
+    ok: false,
+    status: 0,
+    statusText: '',
+    headers: [],
+    body: '',
+    binary: false,
+    size: 0,
+    timeMs: 0,
+    url: req.url,
+    redirects: [],
+    truncated: false,
+    error,
+  });
+
+  /** Sends one request with the variables as they are now; true when it went fine. */
+  const send = async (
+    req: HttpRequest,
+    col: HttpCollection | null,
+    retried = false,
+  ): Promise<boolean> => {
+    const current = stateRef.current;
     setSending((m) => ({ ...m, [req.id]: true }));
+    const auth = await tokensFor(req, col, retried);
+    const built = buildRequest(req, col, {
+      ...variablesFor(current, col),
+      ...auth.vars,
+    });
+    if (auth.error) {
+      setSending((m) => ({ ...m, [req.id]: false }));
+      setResponses((m) => ({
+        ...m,
+        [req.id]: {
+          result: authFailure(req, auth.error!),
+          sent: built,
+          captured: {},
+          captureFailed: [],
+          at: Date.now(),
+        },
+      }));
+      return false;
+    }
     const result = await window.electron.http.send({
       id: req.id,
       method: built.method,
@@ -664,6 +1159,10 @@ export default function HttpClientTool({
       insecure: current.options.insecure,
       followRedirects: current.options.followRedirects,
     });
+    // a 401 with a cached token: get a new one and try once more
+    if (result.status === 401 && !retried && authIdsUsed(req, col).length > 0) {
+      return send(req, col, true);
+    }
     setSending((m) => ({ ...m, [req.id]: false }));
     let captured: Record<string, string> = {};
     let captureFailed: string[] = [];
@@ -787,6 +1286,81 @@ export default function HttpClientTool({
     return r;
   };
 
+  // ---------------- the collection as a .http file ----------------
+  const openText = (colId: string) => {
+    const col = stateRef.current.collections.find((c) => c.id === colId);
+    if (!col) return;
+    setTextFor(colId);
+    setSettingsFor(null);
+    setDraft(collectionToHttpText(col));
+    setTextPick(null);
+  };
+
+  /** Parses the text into the collection now; returns the updated collection. */
+  const applyDraft = (text: string): HttpCollection | null => {
+    clearTimeout(textTimer.current);
+    const current = stateRef.current;
+    const col = current.collections.find((c) => c.id === textFor);
+    if (!col) return null;
+    const next = applyHttpText(col, text);
+    change({
+      ...current,
+      collections: current.collections.map((c) => (c.id === col.id ? next : c)),
+    });
+    return next;
+  };
+
+  const editDraft = (text: string) => {
+    setDraft(text);
+    clearTimeout(textTimer.current);
+    textTimer.current = setTimeout(() => applyDraft(text), 350);
+  };
+
+  const runTextRequest = async (index: number | null) => {
+    if (index === null) {
+      say('Put the cursor inside a request (between its ### lines)', true);
+      return;
+    }
+    const col = applyDraft(draft);
+    const req = col?.requests[index];
+    if (!col || !req) return;
+    setTextPick(index);
+    await send(req, col);
+  };
+
+  const pasteHttpFile = () => {
+    const c = newCollection({
+      name: `Pasted ${state.collections.length + 1}`,
+    });
+    change({ ...state, collections: [...state.collections, c] });
+    setTextFor(c.id);
+    setSettingsFor(null);
+    setDraft('');
+    setTextPick(null);
+  };
+
+  /** "Get token" in Environments → Auth: fetch one now and tell how it went. */
+  const testAuth = async (env: HttpEnvironment, config: OAuthConfig) => {
+    const current = stateRef.current;
+    const base = variablesFor({ ...current, activeEnv: env.id });
+    const t = await window.electron.oauth.token({
+      ...resolveOAuth(config, base),
+      insecure: current.options.insecure,
+    });
+    if (t.error) {
+      say(`Auth "${config.id}": ${t.error}`, true);
+      return;
+    }
+    tokens.current[`${env.id}:${config.id}`] = {
+      access: t.accessToken,
+      id: t.idToken,
+      until: Date.now() + Math.max(30, (t.expiresIn || 3000) - 30) * 1000,
+    };
+    say(
+      `Auth "${config.id}": got a token${t.expiresIn ? ` (valid ${Math.round(t.expiresIn / 60)} min)` : ''}`,
+    );
+  };
+
   const importHttp = async () => {
     const files = await window.electron.files.openText('Import .http files', [
       'http',
@@ -796,7 +1370,7 @@ export default function HttpClientTool({
     let next = stateRef.current;
     let count = 0;
     files.forEach((f) => {
-      const requests = parseHttpFile(f.text);
+      const { requests, variables } = parseHttpFileFull(f.text);
       count += requests.length;
       next = {
         ...next,
@@ -805,6 +1379,7 @@ export default function HttpClientTool({
           newCollection({
             name: f.fileName.replace(/\.(http|rest)$/i, ''),
             requests,
+            variables,
           }),
         ],
       };
@@ -815,21 +1390,36 @@ export default function HttpClientTool({
 
   const importEnvironments = async () => {
     const files = await window.electron.files.openText(
-      'Import http-client.env.json',
+      'Import http-client.env.json (and http-client.private.env.json)',
       ['json'],
     );
     if (!files.length) return;
     try {
+      // the private file (secrets) goes last, so it fills in the shared one
+      const ordered = [...files].sort(
+        (a, b) =>
+          Number(/private/i.test(a.fileName)) -
+          Number(/private/i.test(b.fileName)),
+      );
       let envs = stateRef.current.environments;
-      files.forEach((f) => {
-        envs = mergeEnvironments(envs, environmentsFromJson(f.text));
+      let constants = stateRef.current.constants;
+      let auths = 0;
+      ordered.forEach((f) => {
+        const read = readEnvFile(f.text);
+        envs = mergeEnvironments(envs, read.environments);
+        constants = mergeKVs(constants, read.shared);
+        auths += read.environments.reduce((n, e) => n + e.auths.length, 0);
       });
+      const current = stateRef.current;
       change({
-        ...stateRef.current,
+        ...current,
         environments: envs,
-        activeEnv: stateRef.current.activeEnv || envs[0]?.id || null,
+        constants,
+        activeEnv: current.activeEnv || envs[0]?.id || null,
       });
-      say(`${envs.length} environment${envs.length === 1 ? '' : 's'}`);
+      say(
+        `${envs.length} environment${envs.length === 1 ? '' : 's'}${auths ? ` · ${auths} auth configuration${auths === 1 ? '' : 's'}` : ''}`,
+      );
     } catch (e: any) {
       say(`Not an environment file: ${e?.message || e}`, true);
     }
@@ -1091,6 +1681,17 @@ export default function HttpClientTool({
                       </IconButton>
                     </span>
                   </Tooltip>
+                  <Tooltip title="Open as a .http file (edit, paste, run)">
+                    <IconButton
+                      size="small"
+                      onClick={() => openText(col.id)}
+                      aria-label={`Open ${col.name} as .http`}
+                      sx={{ p: 0.4 }}
+                      color={textFor === col.id ? 'primary' : 'default'}
+                    >
+                      <CodeIcon fontSize="small" />
+                    </IconButton>
+                  </Tooltip>
                   <Tooltip title="Add request">
                     <IconButton
                       size="small"
@@ -1143,6 +1744,7 @@ export default function HttpClientTool({
                     onClick={() => {
                       setSelected(r.id);
                       setSettingsFor(null);
+                      setTextFor(null);
                     }}
                     onContextMenu={(e) => {
                       e.preventDefault();
@@ -1222,6 +1824,15 @@ export default function HttpClientTool({
         >
           Paste cURL
         </Button>
+        <Tooltip title="Paste a whole .http file from WebStorm">
+          <Button
+            size="small"
+            startIcon={<ContentPasteIcon />}
+            onClick={pasteHttpFile}
+          >
+            .http
+          </Button>
+        </Tooltip>
       </Box>
     </Paper>
   );
@@ -1254,8 +1865,18 @@ export default function HttpClientTool({
       <AuthEditor
         auth={colSettings.auth}
         allowInherit={false}
+        authIds={envAuthIds}
         onChange={(auth) =>
           change(updateCollection(state, colSettings.id, { auth }))
+        }
+      />
+      <Typography variant="subtitle2" sx={{ mt: 2, mb: 1 }}>
+        Variables (`@name = value` in its .http file)
+      </Typography>
+      <KVTable
+        rows={colSettings.variables}
+        onChange={(variables) =>
+          change(updateCollection(state, colSettings.id, { variables }))
         }
       />
       <Typography variant="subtitle2" sx={{ mt: 2, mb: 1 }}>
@@ -1271,18 +1892,395 @@ export default function HttpClientTool({
   );
 
   // ---------------- right: request + response ----------------
-  const result = shown?.result;
-  let parsedJson: unknown;
-  let isJson = false;
-  if (result && !result.error && !result.binary) {
-    try {
-      parsedJson = JSON.parse(result.body);
-      isJson = typeof parsedJson === 'object' && parsedJson !== null;
-    } catch (e) {
-      isJson = false;
+  const responsePanel = (req: HttpRequest) => {
+    const res = responses[req.id];
+    const result = res?.result;
+    let parsedJson: unknown;
+    let isJson = false;
+    if (result && !result.error && !result.binary) {
+      try {
+        parsedJson = JSON.parse(result.body);
+        isJson = typeof parsedJson === 'object' && parsedJson !== null;
+      } catch (e) {
+        isJson = false;
+      }
     }
-  }
+    return (
+      <Paper
+        sx={{ p: 1.5, display: 'flex', flexDirection: 'column', minHeight: 0 }}
+      >
+        {!result && (
+          <Typography variant="body2" color="text.secondary" sx={{ m: 'auto' }}>
+            {sending[req.id] ? 'Sending…' : 'Send it to see the response here.'}
+          </Typography>
+        )}
+        {result && (
+          <>
+            <Box
+              sx={{
+                display: 'flex',
+                gap: 1,
+                alignItems: 'center',
+                flexWrap: 'wrap',
+              }}
+            >
+              <Chip
+                size="small"
+                color={statusColor(result)}
+                label={
+                  result.error
+                    ? 'Error'
+                    : `${result.status} ${result.statusText}`
+                }
+              />
+              <Typography variant="caption" color="text.secondary">
+                {result.timeMs} ms · {sizeText(result.size)}
+                {result.redirects.length
+                  ? ` · ${result.redirects.length} redirect(s)`
+                  : ''}
+                {result.truncated ? ' · cut at 10 MB' : ''}
+              </Typography>
+              {Object.entries(res!.captured).map(([k, v]) => (
+                <Tooltip key={k} title={v}>
+                  <Chip
+                    size="small"
+                    variant="outlined"
+                    color="success"
+                    label={`{{${k}}} saved`}
+                  />
+                </Tooltip>
+              ))}
+              {res!.captureFailed.map((k) => (
+                <Chip
+                  key={k}
+                  size="small"
+                  variant="outlined"
+                  color="warning"
+                  label={`{{${k}}} not found`}
+                />
+              ))}
+              <Box sx={{ flex: 1 }} />
+              <Tooltip title="Copy the body">
+                <IconButton
+                  size="small"
+                  onClick={() =>
+                    navigator.clipboard.writeText(
+                      isJson
+                        ? JSON.stringify(parsedJson, null, 2)
+                        : result.body,
+                    )
+                  }
+                  aria-label="Copy the body"
+                >
+                  <ContentCopyIcon fontSize="small" />
+                </IconButton>
+              </Tooltip>
+            </Box>
+            {result.error ? (
+              <Alert severity="error" sx={{ mt: 1 }}>
+                {result.error}
+              </Alert>
+            ) : (
+              <>
+                <Tabs
+                  value={resTab}
+                  onChange={(_, v) => setResTab(v)}
+                  sx={{ minHeight: 34 }}
+                >
+                  <Tab value="body" label="Body" sx={{ minHeight: 34 }} />
+                  <Tab
+                    value="headers"
+                    label={`Headers (${result.headers.length})`}
+                    sx={{ minHeight: 34 }}
+                  />
+                  <Tab value="sent" label="Sent" sx={{ minHeight: 34 }} />
+                </Tabs>
+                <Box sx={{ flex: 1, minHeight: 0, overflow: 'auto', pt: 1 }}>
+                  {resTab === 'body' &&
+                    (isJson ? (
+                      <JsonFoldView value={parsedJson} />
+                    ) : (
+                      <CodeArea
+                        value={result.body}
+                        language="plain"
+                        readOnly
+                        minHeight={120}
+                        ariaLabel="Response body"
+                      />
+                    ))}
+                  {resTab === 'headers' &&
+                    result.headers.map(([k, v], i) => (
+                      // eslint-disable-next-line react/no-array-index-key
+                      <Box
+                        key={i}
+                        sx={{
+                          display: 'flex',
+                          gap: 1,
+                          fontFamily: MONO_FONT,
+                          fontSize: 13,
+                        }}
+                      >
+                        <Box sx={{ fontWeight: 600, minWidth: 200 }}>{k}</Box>
+                        <Box
+                          sx={{
+                            wordBreak: 'break-all',
+                            color: 'text.secondary',
+                          }}
+                        >
+                          {v}
+                        </Box>
+                      </Box>
+                    ))}
+                  {resTab === 'sent' && (
+                    <CodeArea
+                      value={[
+                        `${res!.sent.method} ${res!.sent.url}`,
+                        ...res!.sent.headers.map(
+                          ([k, v]) =>
+                            `${k}: ${/^authorization$/i.test(k) ? `${v.slice(0, 12)}…` : v}`,
+                        ),
+                        ...(res!.sent.body ? ['', res!.sent.body] : []),
+                      ].join('\n')}
+                      language="http"
+                      readOnly
+                      minHeight={120}
+                      ariaLabel="What was sent"
+                    />
+                  )}
+                </Box>
+              </>
+            )}
+          </>
+        )}
+      </Paper>
+    );
+  };
   const tabCount = (n: number) => (n ? ` (${n})` : '');
+
+  const textCol = state.collections.find((c) => c.id === textFor);
+  const outline = textCol ? parseHttpFileFull(draft) : null;
+  const textView = textCol && outline && (
+    <Box
+      sx={{
+        display: 'grid',
+        gridTemplateRows: 'auto minmax(0, 1.3fr) minmax(0, 1fr)',
+        gap: 1.5,
+        minHeight: 0,
+        minWidth: 0,
+      }}
+    >
+      <Paper sx={{ p: 1, display: 'flex', alignItems: 'center', gap: 1 }}>
+        <CodeIcon fontSize="small" color="action" />
+        <Typography variant="subtitle1" sx={{ fontWeight: 600 }} noWrap>
+          {textCol.name}.http
+        </Typography>
+        <Typography variant="caption" color="text.secondary" sx={{ flex: 1 }}>
+          Edit or paste a whole WebStorm file · Ctrl/⌘+Enter runs the request
+          under the cursor
+        </Typography>
+        <Tooltip title="Run all, top to bottom">
+          <span>
+            <IconButton
+              size="small"
+              disabled={!!runningCollection || !outline.requests.length}
+              onClick={() => {
+                const col = applyDraft(draft);
+                if (col) runCollection(col);
+              }}
+              aria-label="Run all"
+            >
+              <PlayArrowIcon fontSize="small" color="success" />
+            </IconButton>
+          </span>
+        </Tooltip>
+        <Tooltip title="Save as .http">
+          <IconButton
+            size="small"
+            onClick={async () => {
+              const saved = await window.electron.files.saveText(
+                `${textCol.name}.http`,
+                draft,
+              );
+              if (saved) say(`Saved ${saved}`);
+            }}
+            aria-label="Save as .http"
+          >
+            <FileDownloadOutlinedIcon fontSize="small" />
+          </IconButton>
+        </Tooltip>
+        <Button
+          size="small"
+          startIcon={<ViewListIcon />}
+          onClick={() => {
+            const col = applyDraft(draft);
+            setTextFor(null);
+            if (col?.requests[textPick ?? 0])
+              setSelected(col.requests[textPick ?? 0].id);
+          }}
+        >
+          Visual
+        </Button>
+      </Paper>
+      <Box
+        sx={{
+          display: 'grid',
+          gridTemplateColumns: 'minmax(0, 1fr) 260px',
+          gap: 1.5,
+          minHeight: 0,
+        }}
+      >
+        <Box
+          sx={{ minHeight: 0, overflow: 'auto' }}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+              e.preventDefault();
+              const ta = e.target as HTMLTextAreaElement;
+              runTextRequest(
+                typeof ta.selectionStart === 'number'
+                  ? requestIndexAt(draft, ta.selectionStart)
+                  : null,
+              );
+            }
+          }}
+        >
+          <CodeArea
+            value={draft}
+            onChange={editDraft}
+            language="http"
+            minHeight="100%"
+            ariaLabel=".http file"
+            placeholder={
+              '@host = http://localhost:3000\n\n### Login\nPOST {{host}}/auth/login\nContent-Type: application/json\n\n{"user": "ann"}\n\n> {%\n    client.global.set("token", response.body.token);\n%}'
+            }
+          />
+        </Box>
+        <Paper sx={{ p: 1, overflow: 'auto', minHeight: 0 }}>
+          <Typography variant="overline" color="text.secondary">
+            {outline.requests.length} request
+            {outline.requests.length === 1 ? '' : 's'}
+          </Typography>
+          {outline.variables.length > 0 && (
+            <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5, mb: 1 }}>
+              {outline.variables.map((v) => (
+                <Tooltip key={v.key} title={v.value}>
+                  <Chip
+                    size="small"
+                    variant="outlined"
+                    label={`@${v.key}`}
+                    sx={{ fontFamily: MONO_FONT, fontSize: 11 }}
+                  />
+                </Tooltip>
+              ))}
+            </Box>
+          )}
+          {outline.requests.map((r, i) => {
+            const id = textCol.requests[i]?.id;
+            const busy = !!id && sending[id];
+            return (
+              <Box
+                // eslint-disable-next-line react/no-array-index-key
+                key={i}
+                onClick={() => setTextPick(i)}
+                sx={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 0.75,
+                  px: 0.75,
+                  py: 0.5,
+                  borderRadius: 1,
+                  cursor: 'pointer',
+                  bgcolor: textPick === i ? 'action.selected' : undefined,
+                  '&:hover': { bgcolor: 'action.hover' },
+                }}
+              >
+                <IconButton
+                  size="small"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (busy && id) window.electron.http.cancel(id);
+                    else runTextRequest(i);
+                  }}
+                  aria-label={busy ? `Cancel ${r.name}` : `Run ${r.name}`}
+                  sx={{ p: 0.25 }}
+                >
+                  {busy ? (
+                    <StopIcon sx={{ fontSize: 16 }} color="error" />
+                  ) : (
+                    <PlayArrowIcon sx={{ fontSize: 16 }} color="success" />
+                  )}
+                </IconButton>
+                <Typography
+                  sx={{
+                    fontFamily: MONO_FONT,
+                    fontSize: 11,
+                    fontWeight: 700,
+                    color: methodColor(r.method),
+                    minWidth: 40,
+                  }}
+                >
+                  {r.method}
+                </Typography>
+                <Box sx={{ minWidth: 0, flex: 1 }}>
+                  <Typography variant="body2" noWrap>
+                    {r.name}
+                  </Typography>
+                  <Typography
+                    variant="caption"
+                    color="text.secondary"
+                    noWrap
+                    sx={{ display: 'block', fontFamily: MONO_FONT }}
+                  >
+                    {r.url}
+                  </Typography>
+                </Box>
+                {r.auth.type === 'oauth2' && (
+                  <Tooltip title={`OAuth: ${r.auth.authId}`}>
+                    <Chip
+                      size="small"
+                      label="auth"
+                      sx={{ height: 18, fontSize: 10 }}
+                    />
+                  </Tooltip>
+                )}
+                {!!r.captures.length && (
+                  <Tooltip
+                    title={`Saves ${r.captures.map((c) => `{{${c.variable}}}`).join(', ')}`}
+                  >
+                    <Chip
+                      size="small"
+                      label={`→ ${r.captures.length}`}
+                      sx={{ height: 18, fontSize: 10 }}
+                    />
+                  </Tooltip>
+                )}
+                {id && <RunIcon state={runStates[id]} />}
+              </Box>
+            );
+          })}
+          {!outline.requests.length && (
+            <Typography variant="body2" color="text.secondary" sx={{ p: 1 }}>
+              Paste a .http file - its requests show up here.
+            </Typography>
+          )}
+        </Paper>
+      </Box>
+      {textPick !== null && textCol.requests[textPick] ? (
+        responsePanel(textCol.requests[textPick])
+      ) : (
+        <Paper
+          sx={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+          }}
+        >
+          <Typography variant="body2" color="text.secondary">
+            Run a request (▶ or Ctrl/⌘+Enter) to see its response here.
+          </Typography>
+        </Paper>
+      )}
+    </Box>
+  );
   const editor = request && (
     <Box
       sx={{
@@ -1290,6 +2288,7 @@ export default function HttpClientTool({
         gridTemplateRows: 'auto minmax(0, 1fr)',
         gap: 1.5,
         minHeight: 0,
+        minWidth: 0,
       }}
     >
       <Paper sx={{ p: 1.5 }}>
@@ -1441,6 +2440,16 @@ export default function HttpClientTool({
                 <MenuItem value="text">Text</MenuItem>
                 <MenuItem value="xml">XML</MenuItem>
               </Select>
+              <Tooltip title="Put the text of a note in as the body">
+                <Button
+                  size="small"
+                  startIcon={<NotesIcon />}
+                  onClick={() => setBodyFromNote(true)}
+                  sx={{ ml: 1, mb: 1 }}
+                >
+                  From note…
+                </Button>
+              </Tooltip>
               {request.body.type === 'form' && (
                 <KVTable
                   rows={request.body.form}
@@ -1471,6 +2480,7 @@ export default function HttpClientTool({
             <AuthEditor
               auth={request.auth}
               allowInherit
+              authIds={envAuthIds}
               onChange={(auth) => editReq({ auth })}
             />
           )}
@@ -1521,155 +2531,7 @@ export default function HttpClientTool({
         </Box>
       </Paper>
 
-      <Paper
-        sx={{ p: 1.5, display: 'flex', flexDirection: 'column', minHeight: 0 }}
-      >
-        {!result && (
-          <Typography variant="body2" color="text.secondary" sx={{ m: 'auto' }}>
-            {sending[request.id]
-              ? 'Sending…'
-              : 'Send it to see the response here.'}
-          </Typography>
-        )}
-        {result && (
-          <>
-            <Box
-              sx={{
-                display: 'flex',
-                gap: 1,
-                alignItems: 'center',
-                flexWrap: 'wrap',
-              }}
-            >
-              <Chip
-                size="small"
-                color={statusColor(result)}
-                label={
-                  result.error
-                    ? 'Error'
-                    : `${result.status} ${result.statusText}`
-                }
-              />
-              <Typography variant="caption" color="text.secondary">
-                {result.timeMs} ms · {sizeText(result.size)}
-                {result.redirects.length
-                  ? ` · ${result.redirects.length} redirect(s)`
-                  : ''}
-                {result.truncated ? ' · cut at 10 MB' : ''}
-              </Typography>
-              {Object.entries(shown!.captured).map(([k, v]) => (
-                <Tooltip key={k} title={v}>
-                  <Chip
-                    size="small"
-                    variant="outlined"
-                    color="success"
-                    label={`{{${k}}} saved`}
-                  />
-                </Tooltip>
-              ))}
-              {shown!.captureFailed.map((k) => (
-                <Chip
-                  key={k}
-                  size="small"
-                  variant="outlined"
-                  color="warning"
-                  label={`{{${k}}} not found`}
-                />
-              ))}
-              <Box sx={{ flex: 1 }} />
-              <Tooltip title="Copy the body">
-                <IconButton
-                  size="small"
-                  onClick={() =>
-                    navigator.clipboard.writeText(
-                      isJson
-                        ? JSON.stringify(parsedJson, null, 2)
-                        : result.body,
-                    )
-                  }
-                  aria-label="Copy the body"
-                >
-                  <ContentCopyIcon fontSize="small" />
-                </IconButton>
-              </Tooltip>
-            </Box>
-            {result.error ? (
-              <Alert severity="error" sx={{ mt: 1 }}>
-                {result.error}
-              </Alert>
-            ) : (
-              <>
-                <Tabs
-                  value={resTab}
-                  onChange={(_, v) => setResTab(v)}
-                  sx={{ minHeight: 34 }}
-                >
-                  <Tab value="body" label="Body" sx={{ minHeight: 34 }} />
-                  <Tab
-                    value="headers"
-                    label={`Headers (${result.headers.length})`}
-                    sx={{ minHeight: 34 }}
-                  />
-                  <Tab value="sent" label="Sent" sx={{ minHeight: 34 }} />
-                </Tabs>
-                <Box sx={{ flex: 1, minHeight: 0, overflow: 'auto', pt: 1 }}>
-                  {resTab === 'body' &&
-                    (isJson ? (
-                      <JsonFoldView value={parsedJson} />
-                    ) : (
-                      <CodeArea
-                        value={result.body}
-                        language="plain"
-                        readOnly
-                        minHeight={120}
-                        ariaLabel="Response body"
-                      />
-                    ))}
-                  {resTab === 'headers' &&
-                    result.headers.map(([k, v], i) => (
-                      // eslint-disable-next-line react/no-array-index-key
-                      <Box
-                        key={i}
-                        sx={{
-                          display: 'flex',
-                          gap: 1,
-                          fontFamily: MONO_FONT,
-                          fontSize: 13,
-                        }}
-                      >
-                        <Box sx={{ fontWeight: 600, minWidth: 200 }}>{k}</Box>
-                        <Box
-                          sx={{
-                            wordBreak: 'break-all',
-                            color: 'text.secondary',
-                          }}
-                        >
-                          {v}
-                        </Box>
-                      </Box>
-                    ))}
-                  {resTab === 'sent' && (
-                    <CodeArea
-                      value={[
-                        `${shown!.sent.method} ${shown!.sent.url}`,
-                        ...shown!.sent.headers.map(
-                          ([k, v]) =>
-                            `${k}: ${/^authorization$/i.test(k) ? `${v.slice(0, 12)}…` : v}`,
-                        ),
-                        ...(shown!.sent.body ? ['', shown!.sent.body] : []),
-                      ].join('\n')}
-                      language="http"
-                      readOnly
-                      minHeight={120}
-                      ariaLabel="What was sent"
-                    />
-                  )}
-                </Box>
-              </>
-            )}
-          </>
-        )}
-      </Paper>
+      {responsePanel(request)}
     </Box>
   );
 
@@ -1684,7 +2546,7 @@ export default function HttpClientTool({
       }}
     >
       {list}
-      {settingsView || editor || (
+      {textView || settingsView || editor || (
         <Paper
           sx={{
             display: 'flex',
@@ -1767,7 +2629,7 @@ export default function HttpClientTool({
               closeMenu();
               const saved = await window.electron.files.saveText(
                 'http-client.env.json',
-                environmentsToJson(state.environments),
+                environmentsToJson(state.environments, state.constants),
               );
               if (saved) say(`Saved ${saved}`);
             }}
@@ -1816,6 +2678,21 @@ export default function HttpClientTool({
             <ListItemText
               primary="Settings"
               secondary="Auth, headers, stop on error"
+            />
+          </MenuItem>,
+          <MenuItem
+            key="t"
+            onClick={() => {
+              openText(menuCollection.id);
+              closeMenu();
+            }}
+          >
+            <ListItemIcon>
+              <CodeIcon fontSize="small" />
+            </ListItemIcon>
+            <ListItemText
+              primary="Open as .http file"
+              secondary="Edit, paste, run like in WebStorm"
             />
           </MenuItem>,
           <MenuItem
@@ -1919,8 +2796,35 @@ export default function HttpClientTool({
         ]}
       </Menu>
 
+      <NotePicker
+        open={bodyFromNote}
+        title="Body from a note"
+        prefer="json"
+        onClose={() => setBodyFromNote(false)}
+        onPick={(note) => {
+          setBodyFromNote(false);
+          if (!request) return;
+          const text = noteText(note, 'json');
+          let json = note.format === 'json';
+          try {
+            JSON.parse(text);
+            json = true;
+          } catch (e) {
+            // not JSON: keep it as text (or the type already picked)
+          }
+          const type: BodyType = json
+            ? 'json'
+            : request.body.type === 'none' || request.body.type === 'form'
+              ? 'text'
+              : request.body.type;
+          editReq({ body: { ...request.body, type, text } });
+          setTab('body');
+          say(`Body from "${note.title || 'Untitled'}"`);
+        }}
+      />
       <EnvironmentsDialog
         open={envOpen}
+        onTestAuth={testAuth}
         state={state}
         onChange={change}
         onClose={() => setEnvOpen(false)}

@@ -1,5 +1,9 @@
 import type { DockerStatus } from '../main/docker';
 import type { HttpResult, HttpSend } from '../main/httpClient';
+import type { OAuthRequest, OAuthToken } from '../main/oauth';
+import type { SqlResult } from '../main/sqlTools';
+import type { DockerfileRecipe } from '../main/dockerfileTools';
+import type { Snapshot } from '../main/sqlRunner';
 import type { RunSnapshot, RunStepInput } from '../main/commandRunner';
 import type {
   ConnectionString,
@@ -119,6 +123,59 @@ export interface IElectronAPI {
   http: {
     send: (req: HttpSend) => Promise<HttpResult>;
     cancel: (id: string) => Promise<boolean>;
+  };
+  dockerfile: {
+    pick: (current?: string) => Promise<{ path: string; text: string } | null>;
+    pickFolder: (current?: string) => Promise<string | null>;
+    read: (file: string) => Promise<string | null>;
+    up: (
+      recipe: DockerfileRecipe,
+      rebuild: boolean,
+    ) => Promise<{ ok: boolean; error: string | null; id?: string }>;
+    stopBuild: (id: string) => Promise<boolean>;
+  };
+  sql: {
+    targets: () => Promise<{
+      error: string | null;
+      targets: {
+        id: string;
+        name: string;
+        kind: string;
+        running: boolean;
+        project: string | null;
+      }[];
+    }>;
+    databases: (id: string) => Promise<string[]>;
+    tables: (id: string, db: string) => Promise<string[]>;
+    run: (
+      runId: string,
+      id: string,
+      db: string,
+      sql: string,
+      dryRun?: boolean,
+    ) => Promise<SqlResult>;
+    cancel: (runId: string) => Promise<boolean>;
+    snapshots: (container?: string, db?: string) => Promise<Snapshot[]>;
+    renameSnapshot: (file: string, name: string) => Promise<boolean>;
+    snapshot: (
+      id: string,
+      db: string,
+      name?: string,
+      auto?: boolean,
+    ) => Promise<{
+      ok: boolean;
+      error: string | null;
+      snapshot: Snapshot | null;
+    }>;
+    restore: (
+      id: string,
+      db: string,
+      file: string,
+    ) => Promise<{ ok: boolean; error: string | null }>;
+    deleteSnapshot: (file: string) => Promise<boolean>;
+  };
+  oauth: {
+    token: (req: OAuthRequest) => Promise<OAuthToken>;
   };
   files: {
     openText: (

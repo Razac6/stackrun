@@ -37,7 +37,12 @@ describe('variables', () => {
       ...emptyState(),
       constants: [kv('a', 'const'), kv('b', 'const'), kv('c', 'const')],
       environments: [
-        { id: 'e', name: 'dev', variables: [kv('b', 'env'), kv('c', 'env')] },
+        {
+          id: 'e',
+          name: 'dev',
+          variables: [kv('b', 'env'), kv('c', 'env')],
+          auths: [],
+        },
       ],
       activeEnv: 'e',
       captured: { c: 'captured' },
@@ -218,7 +223,7 @@ describe('environments and state', () => {
       prod: { host: 'http://p' },
     });
     const merged = mergeEnvironments(
-      [{ id: 'x', name: 'dev', variables: [] }],
+      [{ id: 'x', name: 'dev', variables: [], auths: [] }],
       envs,
     );
     expect(merged.map((e) => [e.id === 'x', e.name])).toEqual([

@@ -19,6 +19,27 @@ export const tokens = {
   surface: '#ffffff', // Cards
   radiusCard: 24,
   shadowCard: '0 1px 2px rgba(17,18,20,0.04), 0 8px 24px rgba(17,18,20,0.06)',
+  tooltip: '#111214',
+  scrollThumb: '#c9cdd2',
+  scrollThumbHover: '#a9aeb5',
+  dialogShadow: '0 24px 64px rgba(17,18,20,0.18)',
+};
+
+// The same roles at night: light text on near-black surfaces
+export const darkTokens: typeof tokens = {
+  ink: '#e8eaed',
+  inkSoft: '#26282c',
+  graphite: '#33363b',
+  mute: '#9aa0a8',
+  line: '#2c2f34',
+  canvas: '#0f1012',
+  surface: '#17181b',
+  radiusCard: 24,
+  shadowCard: '0 1px 2px rgba(0,0,0,0.4), 0 8px 24px rgba(0,0,0,0.35)',
+  tooltip: '#2a2c31',
+  scrollThumb: '#3a3d43',
+  scrollThumbHover: '#50545b',
+  dialogShadow: '0 24px 64px rgba(0,0,0,0.6)',
 };
 
 // User-configurable brand colors (Settings > Appearance)
@@ -36,13 +57,26 @@ export const lumaDefaults: LumaColors = {
   band: '#111214',
 };
 
-export function createLumaTheme(colors: LumaColors = lumaDefaults): Theme {
+// Dark: lime buttons and nav pill (a black button would vanish on the dark canvas)
+export const lumaDarkDefaults: LumaColors = {
+  primary: '#c5e84a',
+  accent: '#c5e84a',
+  highlight: '#ff7aa8',
+  band: '#1c1d20',
+};
+
+export function createLumaTheme(
+  colors: LumaColors = lumaDefaults,
+  mode: 'light' | 'dark' = 'light',
+): Theme {
+  const tk = mode === 'dark' ? darkTokens : tokens;
   const theme = createTheme({
     variant: 'luma',
     shape: {
       borderRadius: 6,
     },
     palette: {
+      mode,
       // light/dark/contrastText are derived, so any picked color stays readable
       primary: {
         main: colors.primary,
@@ -51,14 +85,14 @@ export function createLumaTheme(colors: LumaColors = lumaDefaults): Theme {
         main: colors.accent,
       },
       background: {
-        default: tokens.canvas,
-        paper: tokens.surface,
+        default: tk.canvas,
+        paper: tk.surface,
       },
       text: {
-        primary: tokens.ink,
-        secondary: tokens.mute,
+        primary: tk.ink,
+        secondary: tk.mute,
       },
-      divider: tokens.line,
+      divider: tk.line,
       // Semantic colors stay close to Classic so statuses, task types and alerts keep the
       // meaning users already know - the monochrome look is limited to the chrome.
       info: {
@@ -82,10 +116,10 @@ export function createLumaTheme(colors: LumaColors = lumaDefaults): Theme {
       h4: { fontWeight: 400, letterSpacing: '-0.01em' },
       h5: { fontWeight: 500 }, // Card headers
       h6: { fontWeight: 500 },
-      subtitle1: { fontWeight: 500, color: tokens.mute }, // Card labels
-      subtitle2: { fontWeight: 500, color: tokens.mute },
+      subtitle1: { fontWeight: 500, color: tk.mute }, // Card labels
+      subtitle2: { fontWeight: 500, color: tk.mute },
       body1: { fontWeight: 400 },
-      body2: { fontWeight: 400, color: tokens.mute },
+      body2: { fontWeight: 400, color: tk.mute },
       caption: { fontWeight: 500 },
       overline: { fontWeight: 600, letterSpacing: '0.08em' },
       button: { fontWeight: 600, textTransform: 'none' },
@@ -111,7 +145,7 @@ export function createLumaTheme(colors: LumaColors = lumaDefaults): Theme {
           },
           '*': {
             scrollbarWidth: 'thin', // Firefox
-            scrollbarColor: '#c9cdd2 transparent',
+            scrollbarColor: `${tk.scrollThumb} transparent`,
           },
           '*::-webkit-scrollbar': {
             width: '8px',
@@ -121,11 +155,11 @@ export function createLumaTheme(colors: LumaColors = lumaDefaults): Theme {
             background: 'transparent',
           },
           '*::-webkit-scrollbar-thumb': {
-            backgroundColor: '#c9cdd2',
+            backgroundColor: tk.scrollThumb,
             borderRadius: '8px',
           },
           '*::-webkit-scrollbar-thumb:hover': {
-            backgroundColor: '#a9aeb5',
+            backgroundColor: tk.scrollThumbHover,
           },
         },
       },
@@ -135,19 +169,19 @@ export function createLumaTheme(colors: LumaColors = lumaDefaults): Theme {
         },
         styleOverrides: {
           rounded: {
-            borderRadius: tokens.radiusCard,
+            borderRadius: tk.radiusCard,
           },
           elevation0: {
-            boxShadow: tokens.shadowCard,
+            boxShadow: tk.shadowCard,
           },
           elevation1: {
-            boxShadow: tokens.shadowCard,
+            boxShadow: tk.shadowCard,
           },
           elevation2: {
-            boxShadow: tokens.shadowCard,
+            boxShadow: tk.shadowCard,
           },
           elevation3: {
-            boxShadow: tokens.shadowCard,
+            boxShadow: tk.shadowCard,
           },
         },
       },
@@ -160,7 +194,7 @@ export function createLumaTheme(colors: LumaColors = lumaDefaults): Theme {
         styleOverrides: {
           paper: {
             borderRadius: 28,
-            boxShadow: '0 24px 64px rgba(17,18,20,0.18)',
+            boxShadow: tk.dialogShadow,
           },
         },
       },
@@ -189,7 +223,7 @@ export function createLumaTheme(colors: LumaColors = lumaDefaults): Theme {
             paddingRight: 18,
           },
           outlined: {
-            borderColor: tokens.line,
+            borderColor: tk.line,
             '&:hover': {
               borderColor: colors.primary,
               backgroundColor: 'transparent',
@@ -217,10 +251,10 @@ export function createLumaTheme(colors: LumaColors = lumaDefaults): Theme {
           root: {
             borderRadius: 14,
             '& .MuiOutlinedInput-notchedOutline': {
-              borderColor: tokens.line,
+              borderColor: tk.line,
             },
             '&:hover .MuiOutlinedInput-notchedOutline': {
-              borderColor: alpha(tokens.ink, 0.4),
+              borderColor: alpha(tk.ink, 0.4),
             },
           },
         },
@@ -231,7 +265,7 @@ export function createLumaTheme(colors: LumaColors = lumaDefaults): Theme {
             gap: 4,
             padding: 4,
             borderRadius: 999,
-            backgroundColor: tokens.canvas,
+            backgroundColor: tk.canvas,
           },
           grouped: {
             border: 'none !important',
@@ -244,7 +278,7 @@ export function createLumaTheme(colors: LumaColors = lumaDefaults): Theme {
           root: {
             textTransform: 'none',
             fontWeight: 600,
-            color: tokens.mute,
+            color: tk.mute,
             '&.Mui-selected, &.Mui-selected:hover': {
               backgroundColor: colors.primary,
               color: 'var(--thingy-primary-contrast, #ffffff)',
@@ -255,14 +289,15 @@ export function createLumaTheme(colors: LumaColors = lumaDefaults): Theme {
       MuiTooltip: {
         styleOverrides: {
           tooltip: {
-            backgroundColor: tokens.ink,
+            backgroundColor: tk.tooltip,
+            color: mode === 'dark' ? tk.ink : '#ffffff',
             fontSize: '0.75rem',
             fontWeight: 500,
             borderRadius: 10,
             padding: '6px 10px',
           },
           arrow: {
-            color: tokens.ink,
+            color: tk.ink,
           },
         },
       },
@@ -270,7 +305,7 @@ export function createLumaTheme(colors: LumaColors = lumaDefaults): Theme {
         styleOverrides: {
           root: {
             borderRadius: 999,
-            backgroundColor: tokens.line,
+            backgroundColor: tk.line,
           },
           bar: {
             borderRadius: 999,
@@ -280,7 +315,7 @@ export function createLumaTheme(colors: LumaColors = lumaDefaults): Theme {
       MuiDrawer: {
         styleOverrides: {
           paper: {
-            backgroundColor: tokens.canvas,
+            backgroundColor: tk.canvas,
             borderRight: 'none',
             boxShadow: 'none',
             // Nav items are pills: collapsed they read as round icon buttons, expanded as
@@ -290,23 +325,27 @@ export function createLumaTheme(colors: LumaColors = lumaDefaults): Theme {
               paddingLeft: 12,
               paddingRight: 12,
               borderRadius: 999,
-              color: tokens.ink,
+              color: tk.ink,
               '&:hover': {
-                backgroundColor: alpha(tokens.ink, 0.06),
+                backgroundColor: alpha(tk.ink, 0.06),
               },
             },
             '& .MuiListItemButton-root.Mui-selected': {
               backgroundColor: colors.primary,
               color: 'var(--thingy-primary-contrast, #ffffff)',
               '& .MuiListItemIcon-root': {
-                color: colors.accent,
+                // dark: the pill is lime already, so the icon takes the text color
+                color:
+                  mode === 'dark'
+                    ? 'var(--thingy-primary-contrast, #111214)'
+                    : colors.accent,
               },
               '&:hover': {
                 backgroundColor: alpha(colors.primary, 0.88),
               },
             },
             '& .MuiListItemIcon-root': {
-              color: tokens.ink,
+              color: tk.ink,
             },
             '& .MuiListItemText-primary': {
               fontWeight: 500,

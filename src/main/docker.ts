@@ -43,7 +43,7 @@ const COLIMA_SOCKET = path.join(
 
 let dockerHost: string | null = null; // DOCKER_HOST fallback (Colima socket)
 
-const baseEnv = () => {
+export const baseEnv = () => {
   const env: NodeJS.ProcessEnv = { ...process.env };
   if (process.platform !== 'win32') {
     const parts = (env.PATH || '').split(':').filter(Boolean);
@@ -324,7 +324,7 @@ export const pruneVolumes = async (all: boolean) => {
   };
 };
 
-const inspectContainer = async (id: string) => {
+export const inspectContainer = async (id: string) => {
   const [list, inspect] = await Promise.all([
     listContainers(),
     docker(['inspect', '--format', '{{json .Config.Env}}', id], 8000),

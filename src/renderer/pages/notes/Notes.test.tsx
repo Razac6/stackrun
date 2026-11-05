@@ -1,6 +1,5 @@
 import React from 'react';
 import '@testing-library/jest-dom';
-import { MemoryRouter } from 'react-router-dom';
 import {
   act,
   fireEvent,
@@ -59,11 +58,7 @@ beforeEach(() => {
 
 const renderNotes = async () => {
   await act(async () => {
-    render(
-      <MemoryRouter>
-        <Notes />
-      </MemoryRouter>,
-    );
+    render(<Notes />);
   });
 };
 

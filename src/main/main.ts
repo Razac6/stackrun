@@ -9,6 +9,7 @@ import {
   ipcMain,
   Menu,
   Notification,
+  session,
   shell,
 } from 'electron';
 import log from 'electron-log';
@@ -17,6 +18,9 @@ import { containerReady, registerDockerIpc } from './docker';
 import { registerCommandIpc, RunNotice, stopAllRuns } from './commandRunner';
 import { Store } from './store';
 import { registerHttpIpc } from './httpClient';
+import { registerOAuthIpc } from './oauth';
+import { registerSqlIpc, setSnapshotDir } from './sqlRunner';
+import { registerDockerfileIpc } from './dockerfileRunner';
 import { noticeDecision, readNotifySettings } from './notifySettings';
 
 app.setName('Stackrun');
@@ -31,6 +35,10 @@ if (process.platform === 'win32') {
 if (!app.requestSingleInstanceLock()) app.quit();
 
 let mainWindow: BrowserWindow | null = null;
+
+// Files that would run when "opened" - Base64 → Open refuses them (Save still works)
+const RUNNABLE =
+  /\.(exe|com|bat|cmd|msi|msp|ps1|psm1|vbs|vbe|js|jse|wsf|wsh|hta|scr|pif|cpl|lnk|reg|jar|app|command|sh|bash|zsh|csh|pkg|mpkg|dmg|scpt|workflow|appimage|deb|rpm|run|py|pl|rb)$/i;
 
 const getAssetPath = (...paths: string[]): string =>
   path.join(
@@ -140,6 +148,8 @@ ipcMain.handle(
 ipcMain.handle(
   'files:open-base64',
   async (event, fileName: string, base64: string) => {
+    if (RUNNABLE.test(safeFileName(fileName)))
+      return 'This kind of file could run a program when opened - use Save and check it first';
     const filePath = path.join(
       app.getPath('temp'),
       `stackrun-${Date.now()}-${safeFileName(fileName)}`,
@@ -255,6 +265,10 @@ ipcMain.handle(
 );
 
 registerHttpIpc(ipcMain);
+registerOAuthIpc(ipcMain);
+registerSqlIpc(ipcMain);
+registerDockerfileIpc(ipcMain);
+setSnapshotDir(path.join(app.getPath('userData'), 'sql-snapshots'));
 registerDockerIpc(ipcMain);
 registerCommandIpc(ipcMain, {
   containerReady,
@@ -265,15 +279,31 @@ registerCommandIpc(ipcMain, {
 // ---------------- window ----------------
 const buildMenu = () => {
   const mac = process.platform === 'darwin';
+  // The search shortcut lives in the menu: on macOS ⌘ shortcuts go to the menu first,
+  // so a page-only listener never saw ⌘K there.
+  const go: Electron.MenuItemConstructorOptions = {
+    label: 'Go',
+    submenu: [
+      {
+        label: 'Search…',
+        accelerator: 'CmdOrCtrl+K',
+        click: () => {
+          showWindow();
+          mainWindow?.webContents.send('app:search');
+        },
+      },
+    ],
+  };
   // macOS needs the Edit menu for ⌘C / ⌘V / ⌘A in text fields
   const template: Electron.MenuItemConstructorOptions[] = mac
     ? [
         { role: 'appMenu' },
         { role: 'editMenu' },
         { role: 'viewMenu' },
+        go,
         { role: 'windowMenu' },
       ]
-    : [{ role: 'editMenu' }, { role: 'viewMenu' }];
+    : [{ role: 'editMenu' }, { role: 'viewMenu' }, go];
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 };
 
@@ -291,6 +321,11 @@ const createWindow = () => {
       preload: app.isPackaged
         ? path.join(__dirname, 'preload.js')
         : path.join(__dirname, '../../.erb/dll/preload.js'),
+      // the page gets only what preload.ts exposes - no Node, its own JS world
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      webSecurity: true,
       // Chromium's PDF viewer previews decoded base64 PDFs
       plugins: true,
     },
@@ -305,6 +340,17 @@ const createWindow = () => {
     if (/^https?:\/\//i.test(url)) shell.openExternal(url);
     return { action: 'deny' };
   });
+  // ...and never inside this window: a page from the internet must not get the app's
+  // API (it can run commands)
+  const home = resolveHtmlPath('index.html');
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    if (url.split('#')[0] === home.split('#')[0]) return;
+    event.preventDefault();
+    if (/^https?:\/\//i.test(url)) shell.openExternal(url);
+  });
+  mainWindow.webContents.on('will-attach-webview', (event) =>
+    event.preventDefault(),
+  );
 };
 
 // macOS: closing the window keeps the app (and the running packages) alive
@@ -320,6 +366,10 @@ app.on('will-quit', () => stopAllRuns());
 app
   .whenReady()
   .then(() => {
+    // the page asks for nothing (camera, mic, location...) except writing the clipboard
+    session.defaultSession.setPermissionRequestHandler((wc, permission, done) =>
+      done(permission === 'clipboard-sanitized-write'),
+    );
     buildMenu();
     createWindow();
   })

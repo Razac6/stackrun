@@ -26,6 +26,8 @@ import {
 import { alpha, useTheme } from '@mui/material/styles';
 import SearchIcon from '@mui/icons-material/Search';
 import CloseIcon from '@mui/icons-material/Close';
+import FileUploadOutlinedIcon from '@mui/icons-material/FileUploadOutlined';
+import FileDownloadOutlinedIcon from '@mui/icons-material/FileDownloadOutlined';
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
 import StopIcon from '@mui/icons-material/Stop';
 import ReplayIcon from '@mui/icons-material/Replay';
@@ -67,6 +69,8 @@ import {
   canNest,
   commandLabel,
   duplicateGroup,
+  exportPackages,
+  importPackages,
   emptyCommand,
   emptyGroup,
   expandSteps,
@@ -877,6 +881,43 @@ export default function CommandsTool({
       setSelectedRun(run.id);
       setSelectedStep(options?.only !== undefined ? 0 : null);
     }
+  };
+
+  // ---------------- export / import of packages ----------------
+  const exportToFile = async (
+    groupIds?: string[],
+    name = 'stackrun-commands',
+  ) => {
+    if (!state) return;
+    const saved = await window.electron.files.saveText(
+      `${name}.json`,
+      exportPackages(state, groupIds),
+    );
+    if (saved) showHint(`Saved ${saved}`);
+  };
+  const importFromFile = async () => {
+    if (!state) return;
+    const files = await window.electron.files.openText(
+      'Import command packages',
+      ['json'],
+    );
+    if (!files.length) return;
+    let next = state;
+    const names: string[] = [];
+    try {
+      files.forEach((f) => {
+        const r = importPackages(next, f.text);
+        next = r.state;
+        names.push(...r.added);
+      });
+    } catch (e: any) {
+      showHint(`Could not import: ${e?.message || e}`);
+      return;
+    }
+    change(next);
+    showHint(
+      `Imported ${names.length} package${names.length === 1 ? '' : 's'}: ${names.join(', ')}`,
+    );
   };
 
   const showHint = (text: string) => {
@@ -1996,6 +2037,24 @@ export default function CommandsTool({
           >
             Package
           </Button>
+          <Tooltip title="Import packages (.json from Stackrun)">
+            <IconButton
+              size="small"
+              onClick={importFromFile}
+              aria-label="Import packages"
+            >
+              <FileUploadOutlinedIcon fontSize="small" />
+            </IconButton>
+          </Tooltip>
+          <Tooltip title="Export all packages to a .json file">
+            <IconButton
+              size="small"
+              onClick={() => exportToFile()}
+              aria-label="Export all packages"
+            >
+              <FileDownloadOutlinedIcon fontSize="small" />
+            </IconButton>
+          </Tooltip>
           <Button
             size="small"
             variant="contained"
@@ -2667,6 +2726,18 @@ export default function CommandsTool({
           }}
         >
           Duplicate
+        </MenuItem>
+        <MenuItem
+          onClick={() => {
+            if (groupMenu)
+              exportToFile(
+                [groupMenu.group.id],
+                groupMenu.group.name.replace(/[^\w.-]+/g, '-'),
+              );
+            setGroupMenu(null);
+          }}
+        >
+          Export package…
         </MenuItem>
         {groupMenu &&
           state.groups
