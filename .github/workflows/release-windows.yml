@@ -1,0 +1,53 @@
+name: Build & Release for Windows
+run-name: Build & Release Windows ${{ github.event.inputs.version || 'Auto-detected' }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g., v1.0.0). Leave empty to use package.json version (npm run bump).'
+        required: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out Git repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18.x'
+          cache: 'npm'
+
+      - name: Determine Version
+        shell: bash
+        run: |
+          if [ -z "${{ github.event.inputs.version }}" ]; then
+            PACKAGE_VERSION=$(node -p "require('./package.json').version")
+            echo "VERSION=v${PACKAGE_VERSION}" >> $GITHUB_ENV
+          else
+            echo "VERSION=${{ github.event.inputs.version }}" >> $GITHUB_ENV
+          fi
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build and package Windows application
+        run: npm run package
+
+      - name: Create/Update GitHub Release and upload artifact
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ env.VERSION }}
+          name: Stackrun ${{ env.VERSION }}
+          files: |
+            release/build/*.exe
+            release/build/latest.yml
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,35 @@
+# Logs
+logs
+*.log
+
+# Runtime data
+pids
+*.pid
+*.seed
+
+# Coverage directory used by tools like istanbul
+coverage
+.eslintcache
+
+# Dependency directory
+# https://www.npmjs.org/doc/misc/npm-faq.html#should-i-check-my-node_modules-folder-into-git
+node_modules
+
+# OSX
+.DS_Store
+
+release/app/dist
+release/build
+.erb/dll
+
+.idea
+npm-debug.log.*
+*.css.d.ts
+*.sass.d.ts
+*.scss.d.ts
+
+# .erb build/config scripts and chrome-extension aren't part of the main app's TS program
+# (tsconfig.json no longer includes chrome-extension; .erb scripts never were) - typed lint
+# rules can't parse files outside that program, so keep them out of the main lint pass.
+.erb
+.eslintrc.js

@@ -1,0 +1,18 @@
+{
+  "name": "stackrun",
+  "version": "0.1.0",
+  "description": "Dev notes, command packages, Docker and handy dev tools",
+  "license": "MIT",
+  "author": {
+    "name": "Stackrun",
+    "email": "binekmarcin@gmail.com",
+    "url": "https://webbd.pl"
+  },
+  "main": "./dist/main/main.js",
+  "scripts": {
+    "rebuild": "node -r ts-node/register ../../.erb/scripts/electron-rebuild.js",
+    "postinstall": "npm run link-modules",
+    "link-modules": "node -r ts-node/register ../../.erb/scripts/link-modules.ts"
+  },
+  "dependencies": {}
+}
