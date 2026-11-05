@@ -10,6 +10,7 @@ import SettingsPage, {
 } from './pages/settings/Settings';
 import Layout, { MENU, Page } from './components/Layout';
 import SearchOverlay from './components/SearchOverlay';
+import PortDialog from './components/PortDialog';
 import type { SearchResult } from './components/searchModel';
 import ErrorBoundary from './components/ErrorBoundary';
 import { resolveTheme } from './themes';
@@ -23,6 +24,22 @@ export default function App() {
   );
   const [settings, setSettings] = useState<Record<string, string>>({});
   const [searchOpen, setSearchOpen] = useState(false);
+  // "Port in use": from the menu (Go → Free a port…) or a step that failed on a port
+  const [portDialog, setPortDialog] = useState<{ port: number | null } | null>(
+    null,
+  );
+  useEffect(() => {
+    const fromStep = (e: Event) =>
+      setPortDialog({ port: Number((e as CustomEvent).detail) || null });
+    window.addEventListener('stackrun:free-port', fromStep);
+    const off = window.electron.ipcRenderer.on('app:ports', () =>
+      setPortDialog({ port: null }),
+    );
+    return () => {
+      window.removeEventListener('stackrun:free-port', fromStep);
+      off();
+    };
+  }, []);
   const [openNote, setOpenNote] = useState<{ id: number; at: number } | null>(
     null,
   );
@@ -48,12 +65,14 @@ export default function App() {
     () => [
       ...MENU.map((m) => ({ page: m.mode as string, text: m.text })),
       { page: 'settings', text: 'Settings' },
+      { page: 'ports', text: 'Free a port (port in use)' },
     ],
     [],
   );
   const pick = (r: SearchResult) => {
     const at = Date.now();
-    if (r.kind === 'tool') setPage(r.id as Page);
+    if (r.kind === 'tool' && r.id === 'ports') setPortDialog({ port: null });
+    else if (r.kind === 'tool') setPage(r.id as Page);
     if (r.kind === 'note') {
       setPage('notes');
       setOpenNote({ id: Number(r.id), at });
@@ -152,6 +171,11 @@ export default function App() {
             <SettingsPage settings={settings} onChange={changeSetting} />
           )}
         </Layout>
+        <PortDialog
+          open={!!portDialog}
+          port={portDialog?.port ?? null}
+          onClose={() => setPortDialog(null)}
+        />
         <SearchOverlay
           open={searchOpen}
           tools={searchTools}

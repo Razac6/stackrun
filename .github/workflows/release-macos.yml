@@ -40,6 +40,13 @@ jobs:
       - name: Test
         run: npm test -- --ci
 
+      # GitHub's macOS runners: XProtect keeps freshly made disk images busy, so hdiutil
+      # fails with "Resource busy" while making the DMG (actions/runner-images#7522)
+      - name: Let hdiutil make DMGs
+        run: |
+          sudo pkill -9 XProtect >/dev/null 2>&1 || true
+          for i in $(seq 1 20); do pgrep XProtect >/dev/null || break; sleep 3; done
+
       # Apple Silicon + Intel. Without an Apple certificate the app is ad-hoc signed
       # (.erb/scripts/adhoc-sign.js), so it starts after "right-click > Open" once.
       - name: Build and package macOS application

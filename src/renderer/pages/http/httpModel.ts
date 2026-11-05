@@ -95,6 +95,8 @@ export interface OAuthConfig {
   password: string;
   pkce: boolean;
   audience: string;
+  useIdToken: boolean; // {{$auth.token}} gives the id_token (WebStorm "Use ID Token")
+  extra: Record<string, string>; // "Custom Request Parameters" (resource, prompt…)
 }
 
 export interface HttpEnvironment {
@@ -224,6 +226,8 @@ export const newOAuth = (partial: Partial<OAuthConfig> = {}): OAuthConfig => ({
   password: '',
   pkce: false,
   audience: '',
+  useIdToken: false,
+  extra: {},
   ...partial,
 });
 const asOAuth = (a: any): OAuthConfig =>
@@ -243,6 +247,13 @@ const asOAuth = (a: any): OAuthConfig =>
     password: String(a?.password || ''),
     pkce: !!a?.pkce,
     audience: String(a?.audience || ''),
+    useIdToken: !!a?.useIdToken,
+    extra:
+      a?.extra && typeof a.extra === 'object'
+        ? Object.fromEntries(
+            Object.entries(a.extra).map(([k, v]) => [k, String(v)]),
+          )
+        : {},
   });
 
 const BODY_TYPES: BodyType[] = ['none', 'json', 'text', 'form', 'xml'];
@@ -436,6 +447,9 @@ export const resolveOAuth = (
     username: f(config.username),
     password: f(config.password),
     audience: f(config.audience),
+    extra: Object.fromEntries(
+      Object.entries(config.extra || {}).map(([k, v]) => [k, f(v)]),
+    ),
   };
 };
 
@@ -954,6 +968,10 @@ const GRANT_NAMES: Record<string, OAuthGrant> = {
   password: 'password',
   'authorization code': 'authorization_code',
   authorization_code: 'authorization_code',
+  'authorization code (pkce)': 'authorization_code',
+  'client-credentials': 'client_credentials',
+  'resource owner password': 'password',
+  'password credentials': 'password',
 };
 const GRANT_LABELS: Record<OAuthGrant, string> = {
   client_credentials: 'Client Credentials',
@@ -971,6 +989,23 @@ const pick = (o: Record<string, unknown>, ...names: string[]) => {
   return undefined;
 };
 const str = (v: unknown) => (v === undefined ? '' : String(v));
+
+/**
+ * WebStorm's "Custom Request Parameters": { "resource": "x" } or
+ * { "audience": { "Value": "x", "Use": "Everywhere" } } - plain values either way.
+ */
+const customParams = (raw: unknown): Record<string, string> => {
+  if (!raw || typeof raw !== 'object') return {};
+  const out: Record<string, string> = {};
+  Object.entries(raw as Record<string, unknown>).forEach(([k, v]) => {
+    if (v && typeof v === 'object' && !Array.isArray(v)) {
+      const value = pick(v as Record<string, unknown>, 'Value');
+      if (value !== undefined) out[k] = String(value);
+    } else if (Array.isArray(v)) out[k] = v.map(String).join(' ');
+    else if (v !== undefined && v !== null) out[k] = String(v);
+  });
+  return out;
+};
 
 const oauthFromJetBrains = (
   id: string,
@@ -1002,6 +1037,8 @@ const oauthFromJetBrains = (
     password: str(pick(raw, 'Password')),
     pkce: pkce === true || (typeof pkce === 'object' && pkce !== null),
     audience: str(pick(raw, 'Audience')),
+    useIdToken: pick(raw, 'Use ID Token') === true,
+    extra: customParams(pick(raw, 'Custom Request Parameters')),
   });
 };
 
@@ -1020,6 +1057,9 @@ const oauthToJetBrains = (a: OAuthConfig) => {
   if (a.username) out.Username = a.username;
   if (a.password) out.Password = a.password;
   if (a.audience) out.Audience = a.audience;
+  if (a.useIdToken) out['Use ID Token'] = true;
+  if (Object.keys(a.extra || {}).length)
+    out['Custom Request Parameters'] = { ...a.extra };
   if (a.pkce) out.PKCE = true;
   return out;
 };

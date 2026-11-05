@@ -200,3 +200,53 @@ describe('the .http text editor', () => {
     expect(requestIndexAt(httpFile, httpFile.indexOf('"item"'))).toBe(2);
   });
 });
+
+describe('WebStorm Security.Auth variants', () => {
+  it('maps Azure AD style configs: code + PKCE, custom parameters, ID token', () => {
+    const { environments } = readEnvFile(`{
+      "azure": {
+        "tenant": "abc",
+        "Security": {
+          "Auth": {
+            "aad": {
+              "Type": "OAuth2",
+              "Grant Type": "Authorization Code",
+              "Client ID": "app-id",
+              "Auth URL": "https://login.microsoftonline.com/{{tenant}}/oauth2/v2.0/authorize",
+              "Token URL": "https://login.microsoftonline.com/{{tenant}}/oauth2/v2.0/token",
+              "Redirect URL": "http://localhost:8080/callback",
+              "PKCE": { "Code Challenge Method": "SHA-256" },
+              "Scope": "api://app-id/.default openid",
+              "Client Credentials": "none",
+              "Use ID Token": true,
+              "Custom Request Parameters": {
+                "resource": "api://app-id",
+                "prompt": { "Value": "select_account", "Use": "Everywhere" }
+              }
+            }
+          }
+        }
+      }
+    }`);
+    const aad = environments[0].auths[0];
+    expect(aad).toMatchObject({
+      id: 'aad',
+      grant: 'authorization_code',
+      pkce: true,
+      clientAuth: 'none',
+      useIdToken: true,
+      extra: { resource: 'api://app-id', prompt: 'select_account' },
+    });
+    expect(environments[0].variables.map((v) => v.key)).toEqual(['tenant']);
+    expect(resolveOAuth(aad, { tenant: 'T1' }).tokenUrl).toBe(
+      'https://login.microsoftonline.com/T1/oauth2/v2.0/token',
+    );
+    // and back to WebStorm's shape
+    const again = readEnvFile(environmentsToJson(environments)).environments[0]
+      .auths[0];
+    expect(again).toMatchObject({
+      useIdToken: true,
+      extra: { resource: 'api://app-id', prompt: 'select_account' },
+    });
+  });
+});

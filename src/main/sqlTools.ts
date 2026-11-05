@@ -20,17 +20,70 @@ export interface ExecPlan {
   stdin: string;
 }
 
-const credentials = (kind: DbKind, env: Record<string, string>) => {
-  if (kind === 'postgres')
-    return {
-      user: env.POSTGRES_USER || 'postgres',
-      password: env.POSTGRES_PASSWORD || '',
-    };
-  const get = (k: string) => env[`MARIADB_${k}`] || env[`MYSQL_${k}`] || '';
-  const root = get('ROOT_PASSWORD');
-  if (root || !get('USER')) return { user: 'root', password: root };
-  return { user: get('USER'), password: get('PASSWORD') };
+/** How to connect: typed in (Connection…) or set by the runner (TCP after a socket error). */
+export interface SqlConn {
+  user?: string;
+  password?: string;
+  schema?: string; // postgres: search_path for the query
+  tcp?: boolean; // connect to 127.0.0.1 instead of the local socket
+}
+
+/**
+ * Who to log in as, from the container env: the official images (POSTGRES_*, MYSQL_*,
+ * MARIADB_*) and Bitnami's (POSTGRESQL_*); what you typed in wins.
+ */
+export const credentials = (
+  kind: DbKind,
+  env: Record<string, string>,
+  conn: SqlConn = {},
+) => {
+  let found: { user: string; password: string };
+  if (kind === 'postgres') {
+    const user =
+      env.POSTGRES_USER || env.POSTGRESQL_USERNAME || env.POSTGRESQL_USER || '';
+    const password = env.POSTGRES_PASSWORD || env.POSTGRESQL_PASSWORD || '';
+    // Bitnami: the admin "postgres" has its own password
+    found =
+      !user && env.POSTGRESQL_POSTGRES_PASSWORD
+        ? { user: 'postgres', password: env.POSTGRESQL_POSTGRES_PASSWORD }
+        : { user: user || 'postgres', password };
+  } else {
+    const get = (k: string) => env[`MARIADB_${k}`] || env[`MYSQL_${k}`] || '';
+    const root = get('ROOT_PASSWORD');
+    found =
+      root || !get('USER')
+        ? { user: 'root', password: root }
+        : { user: get('USER'), password: get('PASSWORD') };
+  }
+  return {
+    user: conn.user?.trim() || found.user,
+    password: conn.user?.trim()
+      ? conn.password || ''
+      : conn.password || found.password,
+  };
 };
+
+/** The database to connect to when none is picked yet (listing databases). */
+export const defaultDatabase = (kind: DbKind, env: Record<string, string>) =>
+  kind === 'postgres'
+    ? env.POSTGRES_DB || env.POSTGRESQL_DATABASE || 'postgres'
+    : env.MARIADB_DATABASE || env.MYSQL_DATABASE || '';
+
+const SAFE_SCHEMA = /^[A-Za-z_][\w$-]{0,62}$/;
+
+/** A socket that is not where the client looks (Bitnami, custom images): try TCP. */
+export const socketProblem = (stderr: string) =>
+  /could not connect to server|connection to server on socket|No such file or directory[^\n]*(socket|\.s\.PGSQL)|Can't connect to local (MySQL|MariaDB) server through socket/i.test(
+    stderr,
+  );
+
+/** A friendlier line for a refused login. */
+export const loginHint = (stderr: string) =>
+  /password authentication failed|no password supplied|Access denied for user|role "[^"]+" does not exist|authentication failed/i.test(
+    stderr,
+  )
+    ? ' - set the user / password under "Connection…"'
+    : '';
 
 /** Statements that give rows back; anything else reports what it changed. */
 export const returnsRows = (sql: string) =>
@@ -49,21 +102,27 @@ export const sqlPlan = (
   db: string,
   sql: string,
   dryRun = false,
+  conn: SqlConn = {},
 ): ExecPlan | null => {
-  const { user, password } = credentials(kind, env);
+  const { user, password } = credentials(kind, env, conn);
   if (kind === 'postgres') {
+    const path =
+      conn.schema && SAFE_SCHEMA.test(conn.schema)
+        ? `SET search_path TO "${conn.schema}", public;\n`
+        : '';
     const body = dryRun
-      ? `BEGIN;\n${sql.trim().replace(/;\s*$/, '')};\nROLLBACK;\n`
-      : sql;
+      ? `${path}BEGIN;\n${sql.trim().replace(/;\s*$/, '')};\nROLLBACK;\n`
+      : `${path}${sql}`;
     return {
       env: password ? { PGPASSWORD: password } : {},
       argv: [
         'psql',
         '-X', // no ~/.psqlrc (not -q: it would hide "UPDATE 3")
+        ...(conn.tcp ? ['-h', '127.0.0.1'] : []),
         '-U',
         user,
         '-d',
-        db || user,
+        db || defaultDatabase(kind, env),
         '-v',
         'ON_ERROR_STOP=1',
         '--csv',
@@ -83,6 +142,7 @@ export const sqlPlan = (
       : `${stmt};\nSELECT ROW_COUNT() AS __affected;\n`;
     if (dryRun) text = `START TRANSACTION;\n${text}ROLLBACK;\n`;
     const args = [
+      ...(conn.tcp ? ['-h', '127.0.0.1', '--protocol=TCP'] : []),
       '-u',
       user,
       '--batch',
@@ -216,8 +276,9 @@ export const dumpPlan = (
   kind: DbKind,
   env: Record<string, string>,
   db: string,
+  conn: SqlConn = {},
 ): ExecPlan | null => {
-  const { user, password } = credentials(kind, env);
+  const { user, password } = credentials(kind, env, conn);
   if (kind === 'postgres')
     return {
       env: password ? { PGPASSWORD: password } : {},
@@ -249,8 +310,9 @@ export const restorePlan = (
   kind: DbKind,
   env: Record<string, string>,
   db: string,
+  conn: SqlConn = {},
 ): ExecPlan | null => {
-  const { user, password } = credentials(kind, env);
+  const { user, password } = credentials(kind, env, conn);
   if (kind === 'postgres')
     return {
       env: password ? { PGPASSWORD: password } : {},
@@ -283,7 +345,12 @@ export const listDatabasesSql = (kind: DbKind) =>
     ? 'SELECT datname FROM pg_database WHERE NOT datistemplate ORDER BY 1;'
     : 'SHOW DATABASES;';
 
-export const listTablesSql = (kind: DbKind) =>
+/** Tables (and views) - for postgres those of one schema, from the catalog (so they
+ * all show, not only the ones information_schema lets this user see). */
+export const listTablesSql = (kind: DbKind, schema = 'public') =>
   kind === 'postgres'
-    ? "SELECT CASE WHEN table_schema = 'public' THEN table_name ELSE table_schema || '.' || table_name END FROM information_schema.tables WHERE table_schema NOT IN ('pg_catalog', 'information_schema') ORDER BY table_schema <> 'public', 1;"
+    ? `SELECT c.relname FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f') AND n.nspname = '${SAFE_SCHEMA.test(schema) ? schema : 'public'}' ORDER BY 1;`
     : 'SHOW TABLES;';
+
+export const listSchemasSql = () =>
+  "SELECT nspname FROM pg_catalog.pg_namespace WHERE nspname NOT IN ('pg_catalog', 'information_schema') AND nspname NOT LIKE 'pg\\_toast%' AND nspname NOT LIKE 'pg\\_temp%' ORDER BY nspname <> 'public', 1;";

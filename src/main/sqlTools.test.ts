@@ -79,3 +79,58 @@ describe('SQL tool', () => {
     expect(toResult('mysql', '', 100, 1).message).toBe('Done');
   });
 });
+
+describe('SQL connection', () => {
+  // eslint-disable-next-line global-require
+  const t = require('./sqlTools');
+  it('logs in like the image does, or as typed in', () => {
+    expect(
+      t.credentials('postgres', {
+        POSTGRESQL_USERNAME: 'app',
+        POSTGRESQL_PASSWORD: 'pw',
+      }),
+    ).toEqual({ user: 'app', password: 'pw' });
+    expect(
+      t.credentials('postgres', { POSTGRESQL_POSTGRES_PASSWORD: 'admin' }),
+    ).toEqual({ user: 'postgres', password: 'admin' });
+    expect(
+      t.credentials(
+        'postgres',
+        { POSTGRES_PASSWORD: 'x' },
+        { user: 'me', password: 'mine' },
+      ),
+    ).toEqual({ user: 'me', password: 'mine' });
+    expect(t.defaultDatabase('postgres', { POSTGRESQL_DATABASE: 'shop' })).toBe(
+      'shop',
+    );
+  });
+
+  it('runs in the chosen schema, over TCP when asked', () => {
+    const plan = t.sqlPlan('postgres', {}, 'shop', 'SELECT 1;', false, {
+      schema: 'billing',
+      tcp: true,
+    });
+    expect(plan.stdin).toBe('SET search_path TO "billing", public;\nSELECT 1;');
+    expect(plan.argv).toContain('127.0.0.1');
+    // a strange schema name is not put into SQL
+    expect(
+      t.sqlPlan('postgres', {}, 'shop', 'SELECT 1;', false, {
+        schema: 'x"; drop',
+      }).stdin,
+    ).toBe('SELECT 1;');
+    expect(t.listTablesSql('postgres', 'billing')).toContain(
+      "n.nspname = 'billing'",
+    );
+  });
+
+  it('knows a missing socket and a refused login', () => {
+    expect(
+      t.socketProblem(
+        'psql: error: connection to server on socket "/var/run/postgresql/.s.PGSQL.5432" failed: No such file or directory',
+      ),
+    ).toBe(true);
+    expect(
+      t.loginHint('FATAL:  password authentication failed for user "x"'),
+    ).toMatch(/Connection/);
+  });
+});

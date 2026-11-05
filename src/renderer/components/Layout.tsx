@@ -86,21 +86,31 @@ const Drawer = styled(MuiDrawer, {
   }),
 }));
 
-/** How many packages / commands are running right now (shown on "Commands"). */
-const useRunningCount = () => {
-  const [running, setRunning] = useState<Record<string, boolean>>({});
+/**
+ * What runs right now (the number on "Commands"): every package or single command that
+ * has not finished - including packages that are up, with their dev servers running in
+ * the background until you stop them.
+ */
+const useRunning = () => {
+  const [runs, setRuns] = useState<
+    Record<string, { label: string; up: boolean; running: boolean }>
+  >({});
   useEffect(() => {
-    const mark = (list: RunSnapshot[]) =>
-      setRunning(
-        Object.fromEntries(list.map((r) => [r.id, r.status === 'running'])),
+    const info = (r: RunSnapshot) => ({
+      label: r.label,
+      up: !!r.readyAt,
+      running: r.status === 'running',
+    });
+    window.electron.commands
+      .runs()
+      .then((list) =>
+        setRuns(Object.fromEntries(list.map((r) => [r.id, info(r)]))),
       );
-    window.electron.commands.runs().then(mark);
     return window.electron.ipcRenderer.on('commands:run', (run: any) => {
-      if (run?.id)
-        setRunning((m) => ({ ...m, [run.id]: run.status === 'running' }));
+      if (run?.id) setRuns((m) => ({ ...m, [run.id]: info(run) }));
     });
   }, []);
-  return Object.values(running).filter(Boolean).length;
+  return Object.values(runs).filter((r) => r.running);
 };
 
 export default function Layout({
@@ -122,7 +132,8 @@ export default function Layout({
       localStorage.setItem('sidebar_open', String(!o));
       return !o;
     });
-  const running = useRunningCount();
+  const live = useRunning();
+  const running = live.length;
   const item = (
     key: string,
     text: string,
@@ -196,9 +207,26 @@ export default function Layout({
                 m.mode,
                 m.text,
                 m.mode === 'commands' && running ? (
-                  <Badge badgeContent={running} color="success">
-                    {m.icon}
-                  </Badge>
+                  <Tooltip
+                    placement="right"
+                    title={
+                      <Box>
+                        <b>{running} running</b>
+                        {live.map((r, i) => (
+                          // eslint-disable-next-line react/no-array-index-key
+                          <Box key={i}>
+                            {r.up ? '● ' : '◌ '}
+                            {r.label}
+                            {r.up ? ' - up, servers in the background' : ''}
+                          </Box>
+                        ))}
+                      </Box>
+                    }
+                  >
+                    <Badge badgeContent={running} color="success">
+                      {m.icon}
+                    </Badge>
+                  </Tooltip>
                 ) : (
                   m.icon
                 ),

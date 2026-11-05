@@ -18,6 +18,7 @@ export interface OAuthRequest {
   password?: string;
   pkce?: boolean;
   audience?: string;
+  extra?: Record<string, string>; // custom request parameters
   insecure?: boolean;
 }
 
@@ -62,6 +63,7 @@ export const exchange = async (
     ...fields,
     scope: req.scope,
     audience: req.audience,
+    ...(req.extra || {}),
   };
   const how = req.clientAuth || (req.clientSecret ? 'body' : 'none');
   if (how === 'basic')
@@ -123,6 +125,9 @@ const authorizationCode = async (req: OAuthRequest): Promise<OAuthToken> => {
   url.searchParams.set('state', state);
   if (req.scope) url.searchParams.set('scope', req.scope);
   if (req.audience) url.searchParams.set('audience', req.audience);
+  Object.entries(req.extra || {}).forEach(([k, v]) =>
+    url.searchParams.set(k, v),
+  );
   if (req.pkce) {
     url.searchParams.set('code_challenge', challenge);
     url.searchParams.set('code_challenge_method', 'S256');

@@ -16,6 +16,11 @@ import {
   restorePlan,
   ExecPlan,
   listDatabasesSql,
+  listSchemasSql,
+  loginHint,
+  socketProblem,
+  SqlConn,
+  defaultDatabase,
   listTablesSql,
   SQL_KINDS,
   SqlResult,
@@ -84,50 +89,107 @@ const clean = (stderr: string) =>
     .join('\n')
     .trim();
 
+// A user / password typed in for a container (Connection…), by container name
+const logins = new Map<string, { user: string; password: string }>();
+export const setLogin = (container: string, user: string, password: string) => {
+  if (user.trim()) logins.set(container, { user: user.trim(), password });
+  else logins.delete(container);
+};
+// containers whose client socket is elsewhere: connect over TCP from then on
+const useTcp = new Set<string>();
+
+/**
+ * The container env, with POSTGRES_PASSWORD_FILE & co. read from inside the container
+ * (docker secrets), so the login works like the image's own entrypoint.
+ */
+const containerEnv = async (containerId: string) => {
+  const { container, env } = await inspectContainer(containerId);
+  const out = { ...env };
+  await Promise.all(
+    Object.entries(env)
+      .filter(([k, v]) => k.endsWith('_FILE') && v && !env[k.slice(0, -5)])
+      .map(async ([k, file]) => {
+        const r = await exec(
+          `file-${containerId}-${k}`,
+          ['exec', containerId, 'cat', file],
+          '',
+          8000,
+        );
+        if (r.code === 0) out[k.slice(0, -5)] = r.stdout.replace(/\r?\n$/, '');
+      }),
+  );
+  return { container, env: out };
+};
+
+const connFor = (name: string, schema?: string): SqlConn => ({
+  ...(logins.get(name) || {}),
+  schema,
+  tcp: useTcp.has(name),
+});
+
 export const runSql = async (
   runId: string,
   containerId: string,
   db: string,
   sql: string,
-  timeoutMs = 120000,
-  dryRun = false,
+  timeoutMs: number,
+  dryRun: boolean,
+  schema: string | undefined,
 ): Promise<SqlResult> => {
   const started = Date.now();
   if (!isSafeContainerRef(containerId))
     return fail('Pick a database container');
   if (!sql.trim()) return fail('Nothing to run');
-  const { container, env } = await inspectContainer(containerId);
+  const { container, env } = await containerEnv(containerId);
   if (!container?.db || !SQL_KINDS.includes(container.db))
     return fail('Not a Postgres / MySQL / MariaDB container');
   if (container.state !== 'running') return fail('Start the container first');
-  const plan = sqlPlan(container.db, env, db, sql, dryRun);
-  if (!plan) return fail('Not supported');
-  const envArgs = Object.entries(plan.env).flatMap(([k, v]) => [
-    '-e',
-    `${k}=${v}`,
-  ]);
-  let res = await exec(
-    runId,
-    ['exec', '-i', ...envArgs, containerId, ...plan.argv],
-    plan.stdin,
-    timeoutMs,
-  );
-  if (
-    res.code !== 0 &&
-    plan.alt &&
-    /executable file not found|not found in \$PATH|no such file/i.test(
-      res.stderr,
-    )
-  )
-    res = await exec(
+
+  const attempt = async (conn: SqlConn) => {
+    const plan = sqlPlan(container.db!, env, db, sql, dryRun, conn);
+    if (!plan) return null;
+    const envArgs = Object.entries(plan.env).flatMap(([k, v]) => [
+      '-e',
+      `${k}=${v}`,
+    ]);
+    let res = await exec(
       runId,
-      ['exec', '-i', ...envArgs, containerId, ...plan.alt],
+      ['exec', '-i', ...envArgs, containerId, ...plan.argv],
       plan.stdin,
       timeoutMs,
     );
+    if (
+      res.code !== 0 &&
+      plan.alt &&
+      /executable file not found|not found in \$PATH|no such file/i.test(
+        res.stderr,
+      )
+    )
+      res = await exec(
+        runId,
+        ['exec', '-i', ...envArgs, containerId, ...plan.alt],
+        plan.stdin,
+        timeoutMs,
+      );
+    return res;
+  };
+
+  const conn = connFor(container.name, schema);
+  let res = await attempt(conn);
+  if (!res) return fail('Not supported');
+  // the client looked for a socket that is not there: over TCP then (and from now on)
+  if (res.code !== 0 && !conn.tcp && socketProblem(res.stderr)) {
+    const viaTcp = await attempt({ ...conn, tcp: true });
+    if (viaTcp && (viaTcp.code === 0 || !socketProblem(viaTcp.stderr))) {
+      res = viaTcp;
+      useTcp.add(container.name);
+    }
+  }
   const timeMs = Date.now() - started;
-  if (res.code !== 0)
-    return fail(clean(res.stderr) || `Failed (exit ${res.code})`, timeMs);
+  if (res.code !== 0) {
+    const why = clean(res.stderr) || `Failed (exit ${res.code})`;
+    return fail(`${why}${loginHint(res.stderr)}`, timeMs);
+  }
   const result = toResult(container.db, res.stdout, MAX_ROWS, timeMs);
   if (dryRun)
     result.message = `${result.message.replace(/ · ROLLBACK$/, '')} · rolled back, nothing kept`;
@@ -269,7 +331,7 @@ export const takeSnapshot = async (
   const { container, env } = await inspectContainer(containerId);
   if (!container?.db)
     return { ok: false, error: 'Not a database', snapshot: null };
-  const plan = dumpPlan(container.db, env, db);
+  const plan = dumpPlan(container.db, env, db, connFor(container.name));
   if (!plan) return { ok: false, error: 'Not supported', snapshot: null };
   const res = await runPlan(containerId, plan, null, 10 * 60 * 1000);
   if (res.code !== 0)
@@ -311,7 +373,7 @@ export const restoreSnapshot = async (
   if (!fs.existsSync(full)) return { ok: false, error: 'Snapshot not found' };
   const { container, env } = await inspectContainer(containerId);
   if (!container?.db) return { ok: false, error: 'Not a database' };
-  const plan = restorePlan(container.db, env, db);
+  const plan = restorePlan(container.db, env, db, connFor(container.name));
   if (!plan) return { ok: false, error: 'Not supported' };
   const reset = await resetDatabase(containerId, db);
   if (!reset.ok)
@@ -370,39 +432,96 @@ export const sqlTargets = async () => {
 };
 
 const firstColumn = async (containerId: string, db: string, sql: string) => {
-  const r = await runSql(`list-${containerId}`, containerId, db, sql, 15000);
-  return r.ok ? r.rows.map((row) => row[0]).filter(Boolean) : [];
-};
-
-export const sqlDatabases = async (containerId: string) => {
-  const { container } = await inspectContainer(containerId);
-  if (!container?.db || !SQL_KINDS.includes(container.db)) return [];
-  const list = await firstColumn(
+  const r = await runSql(
+    `list-${containerId}`,
     containerId,
-    '',
-    listDatabasesSql(container.db),
+    db,
+    sql,
+    20000,
+    false,
+    undefined,
   );
-  return list.filter(
-    (d) =>
-      !['information_schema', 'performance_schema', 'mysql', 'sys'].includes(d),
-  );
+  return {
+    list: r.ok ? r.rows.map((row) => row[0]).filter(Boolean) : [],
+    error: r.ok ? null : r.message,
+  };
 };
 
-export const sqlTables = async (containerId: string, db: string) => {
+/** Databases of a container - and why not, when it cannot connect. */
+export const sqlDatabases = async (containerId: string) => {
+  const { container, env } = await inspectContainer(containerId);
+  if (!container?.db || !SQL_KINDS.includes(container.db))
+    return {
+      databases: [],
+      error: 'Not a Postgres / MySQL / MariaDB container',
+    };
+  const sql = listDatabasesSql(container.db);
+  let r = await firstColumn(
+    containerId,
+    defaultDatabase(container.db, env),
+    sql,
+  );
+  // the default database may not exist: postgres always has "postgres"
+  if (r.error && container.db === 'postgres' && /does not exist/i.test(r.error))
+    r = await firstColumn(containerId, 'postgres', sql);
+  return {
+    databases: r.list.filter(
+      (d) =>
+        !['information_schema', 'performance_schema', 'mysql', 'sys'].includes(
+          d,
+        ),
+    ),
+    error: r.error,
+  };
+};
+
+export const sqlSchemas = async (containerId: string, db: string) => {
+  const { container } = await inspectContainer(containerId);
+  if (container?.db !== 'postgres') return [];
+  return (await firstColumn(containerId, db, listSchemasSql())).list;
+};
+
+export const sqlTables = async (
+  containerId: string,
+  db: string,
+  schema?: string,
+) => {
   const { container } = await inspectContainer(containerId);
   if (!container?.db || !SQL_KINDS.includes(container.db)) return [];
-  return firstColumn(containerId, db, listTablesSql(container.db));
+  return (
+    await firstColumn(containerId, db, listTablesSql(container.db, schema))
+  ).list;
 };
 
 export const registerSqlIpc = (ipcMain: IpcMain) => {
   ipcMain.handle('sql:targets', () => sqlTargets());
   ipcMain.handle('sql:databases', (e, id: string) => sqlDatabases(String(id)));
-  ipcMain.handle('sql:tables', (e, id: string, db: string) =>
-    sqlTables(String(id), String(db || '')),
+  ipcMain.handle('sql:schemas', (e, id: string, db: string) =>
+    sqlSchemas(String(id), String(db || '')),
+  );
+  ipcMain.handle('sql:tables', (e, id: string, db: string, schema?: string) =>
+    sqlTables(
+      String(id),
+      String(db || ''),
+      schema ? String(schema) : undefined,
+    ),
+  );
+  ipcMain.handle(
+    'sql:set-login',
+    (e, container: string, user: string, password: string) =>
+      setLogin(String(container), String(user || ''), String(password || '')),
   );
   ipcMain.handle(
     'sql:run',
-    (e, runId: string, id: string, db: string, sql: string, dryRun?: boolean) =>
+    (
+      e,
+      runId: string,
+      id: string,
+      db: string,
+      sql: string,
+      dryRun?: boolean,
+      schema?: string,
+    ) =>
       runSql(
         String(runId),
         String(id),
@@ -410,6 +529,7 @@ export const registerSqlIpc = (ipcMain: IpcMain) => {
         String(sql || ''),
         120000,
         !!dryRun,
+        schema ? String(schema) : undefined,
       ),
   );
   ipcMain.handle('sql:snapshots', (e, container?: string, db?: string) =>

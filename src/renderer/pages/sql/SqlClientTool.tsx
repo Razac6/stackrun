@@ -65,9 +65,11 @@ interface Target {
 interface Saved {
   container: string;
   db: string;
+  schema: string; // postgres
   text: string;
   dryRun: boolean;
   autoVersion: boolean;
+  logins: Record<string, { user: string; password: string }>; // typed in, by container
 }
 
 const KIND_LABEL: Record<string, string> = {
@@ -95,10 +97,19 @@ export default function SqlClientTool() {
   const [saved, setSaved] = useState<Saved>({
     container: '',
     db: '',
+    schema: '',
     text: '',
     dryRun: false,
     autoVersion: true,
+    logins: {},
   });
+  const [schemas, setSchemas] = useState<string[]>([]);
+  const [dbError, setDbError] = useState<string | null>(null);
+  const [connKey, setConnKey] = useState(0); // bump to connect again
+  const [loginDialog, setLoginDialog] = useState<{
+    user: string;
+    password: string;
+  } | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [databases, setDatabases] = useState<string[]>([]);
   const [tables, setTables] = useState<string[]>([]);
@@ -135,6 +146,8 @@ export default function SqlClientTool() {
             ...cur,
             container: String(v.container || ''),
             db: String(v.db || ''),
+            schema: String(v.schema || ''),
+            logins: v.logins && typeof v.logins === 'object' ? v.logins : {},
             text: String(v.text || ''),
             dryRun: !!v.dryRun,
             autoVersion: v.autoVersion !== false,
@@ -174,25 +187,52 @@ export default function SqlClientTool() {
 
   const target = targets.find((t) => t.name === saved.container) || null;
 
+  const isPostgres = target?.kind === 'postgres';
   useEffect(() => {
+    setDbError(null);
     if (!target?.running) {
       setDatabases([]);
       return;
     }
-    window.electron.sql.databases(target.name).then((list) => {
-      setDatabases(list);
-      if (!saved.db && list.length) update({ db: list[0] });
+    (async () => {
+      // a user / password typed in for this container goes first
+      const login = saved.logins[target.name];
+      await window.electron.sql.setLogin(
+        target.name,
+        login?.user || '',
+        login?.password || '',
+      );
+      const r = await window.electron.sql.databases(target.name);
+      setDatabases(r.databases);
+      setDbError(r.error);
+      if ((!saved.db || !r.databases.includes(saved.db)) && r.databases.length)
+        update({ db: r.databases[0] });
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [target?.name, target?.running, connKey]);
+
+  // postgres: the schemas of the database, "public" first
+  useEffect(() => {
+    if (!target?.running || !saved.db || !isPostgres) {
+      setSchemas([]);
+      return;
+    }
+    window.electron.sql.schemas(target.name, saved.db).then((list) => {
+      setSchemas(list);
+      if (list.length && !list.includes(saved.schema))
+        update({ schema: list.includes('public') ? 'public' : list[0] });
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [target?.name, target?.running]);
+  }, [target?.name, target?.running, saved.db, isPostgres, connKey]);
 
+  const schema = isPostgres ? saved.schema || 'public' : undefined;
   const loadTables = useCallback(() => {
     if (!target?.running || !saved.db) {
       setTables([]);
       return;
     }
-    window.electron.sql.tables(target.name, saved.db).then(setTables);
-  }, [target?.name, target?.running, saved.db]);
+    window.electron.sql.tables(target.name, saved.db, schema).then(setTables);
+  }, [target?.name, target?.running, saved.db, schema]);
   useEffect(loadTables, [loadTables]);
 
   const loadVersions = useCallback(() => {
@@ -258,6 +298,7 @@ export default function SqlClientTool() {
       saved.db,
       sql,
       saved.dryRun,
+      schema,
     );
     setBusy(null);
     setResult(r);
@@ -424,6 +465,58 @@ export default function SqlClientTool() {
           ))}
         </Select>
 
+        {isPostgres && schemas.length > 0 && (
+          <Select
+            size="small"
+            fullWidth
+            value={schemas.includes(saved.schema) ? saved.schema : ''}
+            onChange={(e) => update({ schema: String(e.target.value) })}
+            inputProps={{ 'aria-label': 'Schema' }}
+            renderValue={(v) => `schema: ${v}`}
+          >
+            {schemas.map((x) => (
+              <MenuItem key={x} value={x}>
+                {x}
+              </MenuItem>
+            ))}
+          </Select>
+        )}
+        {dbError && (
+          <Alert
+            severity="error"
+            sx={{
+              fontSize: 12,
+              '& .MuiAlert-message': { wordBreak: 'break-word' },
+            }}
+            action={
+              <Button
+                color="inherit"
+                size="small"
+                onClick={() => setConnKey((k) => k + 1)}
+              >
+                Retry
+              </Button>
+            }
+          >
+            {dbError}
+          </Alert>
+        )}
+        {target && (
+          <Button
+            size="small"
+            sx={{ alignSelf: 'flex-start', p: 0, minWidth: 0 }}
+            onClick={() =>
+              setLoginDialog({
+                user: saved.logins[target.name]?.user || '',
+                password: saved.logins[target.name]?.password || '',
+              })
+            }
+          >
+            {saved.logins[target.name]?.user
+              ? `Connection: ${saved.logins[target.name].user}`
+              : 'Connection…'}
+          </Button>
+        )}
         <Typography variant="overline" color="text.secondary" sx={{ mt: 0.5 }}>
           Tables {tables.length ? `(${tables.length})` : ''}
         </Typography>
@@ -432,7 +525,9 @@ export default function SqlClientTool() {
             <Box
               key={t}
               onClick={() => {
-                const q = `SELECT * FROM ${t} LIMIT 100;`;
+                const name =
+                  schema && schema !== 'public' ? `${schema}.${t}` : t;
+                const q = `SELECT * FROM ${name} LIMIT 100;`;
                 update({
                   text: saved.text.trim()
                     ? `${saved.text.replace(/\s*$/, '')}\n\n${q}`
@@ -940,6 +1035,74 @@ export default function SqlClientTool() {
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setVersionsOpen(false)}>Close</Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog
+        open={!!loginDialog}
+        onClose={() => setLoginDialog(null)}
+        maxWidth="xs"
+        fullWidth
+      >
+        <DialogTitle>Connection to {target?.name}</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
+            Stackrun logs in with the container&apos;s own settings
+            (POSTGRES_USER, MYSQL_ROOT_PASSWORD…). When those do not work, type
+            the user here.
+          </Typography>
+          <TextField
+            fullWidth
+            size="small"
+            label="User"
+            value={loginDialog?.user || ''}
+            onChange={(e) =>
+              setLoginDialog((d) => (d ? { ...d, user: e.target.value } : d))
+            }
+            sx={{ mb: 1.5 }}
+            autoFocus
+          />
+          <TextField
+            fullWidth
+            size="small"
+            label="Password"
+            type="password"
+            value={loginDialog?.password || ''}
+            onChange={(e) =>
+              setLoginDialog((d) =>
+                d ? { ...d, password: e.target.value } : d,
+              )
+            }
+          />
+        </DialogContent>
+        <DialogActions>
+          <Button
+            onClick={() => {
+              if (!target) return;
+              const logins = { ...saved.logins };
+              delete logins[target.name];
+              update({ logins });
+              setLoginDialog(null);
+              setConnKey((k) => k + 1);
+            }}
+            sx={{ mr: 'auto' }}
+          >
+            Use the container&apos;s
+          </Button>
+          <Button onClick={() => setLoginDialog(null)}>Cancel</Button>
+          <Button
+            variant="contained"
+            onClick={() => {
+              if (!target || !loginDialog) return;
+              update({
+                logins: { ...saved.logins, [target.name]: loginDialog },
+              });
+              setLoginDialog(null);
+              setConnKey((k) => k + 1);
+            }}
+          >
+            Connect
+          </Button>
         </DialogActions>
       </Dialog>
 

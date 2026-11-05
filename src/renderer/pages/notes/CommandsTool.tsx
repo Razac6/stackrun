@@ -54,6 +54,7 @@ import FilterAltOutlinedIcon from '@mui/icons-material/FilterAltOutlined';
 import TimerOutlinedIcon from '@mui/icons-material/TimerOutlined';
 import { MONO_FONT } from './highlight';
 import BottomToast from './BottomToast';
+import { portFromError } from '../../../main/portTools';
 import { PackageIconView, packageIconLabel } from './packageIcons';
 import useCopy from './useCopy';
 import {
@@ -2497,6 +2498,26 @@ export default function CommandsTool({
                         >
                           Hint: {step.note}
                         </Box>
+                      )}
+                      {portFromError(step.tail) && (
+                        <Button
+                          size="small"
+                          color="error"
+                          variant="outlined"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            // App opens the "Port in use" window
+                            window.dispatchEvent(
+                              new CustomEvent('stackrun:free-port', {
+                                detail: portFromError(step.tail),
+                              }),
+                            );
+                          }}
+                          sx={{ mt: 0.75, display: 'flex' }}
+                        >
+                          Port {portFromError(step.tail)} is taken - see who /
+                          free it
+                        </Button>
                       )}
                     </Box>
                   )}

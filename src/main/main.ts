@@ -21,6 +21,7 @@ import { registerHttpIpc } from './httpClient';
 import { registerOAuthIpc } from './oauth';
 import { registerSqlIpc, setSnapshotDir } from './sqlRunner';
 import { registerDockerfileIpc } from './dockerfileRunner';
+import { registerPortIpc } from './ports';
 import { noticeDecision, readNotifySettings } from './notifySettings';
 
 app.setName('Stackrun');
@@ -268,6 +269,7 @@ registerHttpIpc(ipcMain);
 registerOAuthIpc(ipcMain);
 registerSqlIpc(ipcMain);
 registerDockerfileIpc(ipcMain);
+registerPortIpc(ipcMain);
 setSnapshotDir(path.join(app.getPath('userData'), 'sql-snapshots'));
 registerDockerIpc(ipcMain);
 registerCommandIpc(ipcMain, {
@@ -290,6 +292,14 @@ const buildMenu = () => {
         click: () => {
           showWindow();
           mainWindow?.webContents.send('app:search');
+        },
+      },
+      {
+        label: 'Free a port…',
+        accelerator: 'CmdOrCtrl+Shift+P',
+        click: () => {
+          showWindow();
+          mainWindow?.webContents.send('app:ports');
         },
       },
     ],

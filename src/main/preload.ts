@@ -82,6 +82,10 @@ contextBridge.exposeInMainWorld('electron', {
     send: (req: any) => ipcRenderer.invoke('http:send', req),
     cancel: (id: string) => ipcRenderer.invoke('http:cancel', id),
   },
+  ports: {
+    who: (port: number) => ipcRenderer.invoke('ports:who', port),
+    kill: (pid: number) => ipcRenderer.invoke('ports:kill', pid),
+  },
   dockerfile: {
     pick: (current?: string) => ipcRenderer.invoke('dockerfile:pick', current),
     pickFolder: (current?: string) =>
@@ -94,15 +98,20 @@ contextBridge.exposeInMainWorld('electron', {
   sql: {
     targets: () => ipcRenderer.invoke('sql:targets'),
     databases: (id: string) => ipcRenderer.invoke('sql:databases', id),
-    tables: (id: string, db: string) =>
-      ipcRenderer.invoke('sql:tables', id, db),
+    schemas: (id: string, db: string) =>
+      ipcRenderer.invoke('sql:schemas', id, db),
+    tables: (id: string, db: string, schema?: string) =>
+      ipcRenderer.invoke('sql:tables', id, db, schema),
+    setLogin: (container: string, user: string, password: string) =>
+      ipcRenderer.invoke('sql:set-login', container, user, password),
     run: (
       runId: string,
       id: string,
       db: string,
       sql: string,
       dryRun?: boolean,
-    ) => ipcRenderer.invoke('sql:run', runId, id, db, sql, dryRun),
+      schema?: string,
+    ) => ipcRenderer.invoke('sql:run', runId, id, db, sql, dryRun, schema),
     cancel: (runId: string) => ipcRenderer.invoke('sql:cancel', runId),
     snapshots: (container?: string, db?: string) =>
       ipcRenderer.invoke('sql:snapshots', container, db),

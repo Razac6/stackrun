@@ -71,7 +71,9 @@ export const exitHint = (
     return 'Permission denied - not executable (chmod +x?) or no access to a file.';
   }
   if (
-    /EADDRINUSE|address already in use|port \d+ is already in use/i.test(tail)
+    /EADDRINUSE|address already in use|port \d+ is already in use|port \d+ is unavailable/i.test(
+      tail,
+    )
   ) {
     return 'The port is already in use - an earlier run (or another app) still listens on it.';
   }

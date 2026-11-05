@@ -3,6 +3,7 @@ import type { HttpResult, HttpSend } from '../main/httpClient';
 import type { OAuthRequest, OAuthToken } from '../main/oauth';
 import type { SqlResult } from '../main/sqlTools';
 import type { DockerfileRecipe } from '../main/dockerfileTools';
+import type { PortInfo } from '../main/ports';
 import type { Snapshot } from '../main/sqlRunner';
 import type { RunSnapshot, RunStepInput } from '../main/commandRunner';
 import type {
@@ -124,6 +125,10 @@ export interface IElectronAPI {
     send: (req: HttpSend) => Promise<HttpResult>;
     cancel: (id: string) => Promise<boolean>;
   };
+  ports: {
+    who: (port: number) => Promise<PortInfo>;
+    kill: (pid: number) => Promise<{ ok: boolean; error: string | null }>;
+  };
   dockerfile: {
     pick: (current?: string) => Promise<{ path: string; text: string } | null>;
     pickFolder: (current?: string) => Promise<string | null>;
@@ -145,14 +150,23 @@ export interface IElectronAPI {
         project: string | null;
       }[];
     }>;
-    databases: (id: string) => Promise<string[]>;
-    tables: (id: string, db: string) => Promise<string[]>;
+    databases: (
+      id: string,
+    ) => Promise<{ databases: string[]; error: string | null }>;
+    schemas: (id: string, db: string) => Promise<string[]>;
+    tables: (id: string, db: string, schema?: string) => Promise<string[]>;
+    setLogin: (
+      container: string,
+      user: string,
+      password: string,
+    ) => Promise<void>;
     run: (
       runId: string,
       id: string,
       db: string,
       sql: string,
       dryRun?: boolean,
+      schema?: string,
     ) => Promise<SqlResult>;
     cancel: (runId: string) => Promise<boolean>;
     snapshots: (container?: string, db?: string) => Promise<Snapshot[]>;

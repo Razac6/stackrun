@@ -521,16 +521,25 @@ function EnvironmentsDialog({
   onChange,
   onClose,
   onTestAuth,
+  startTab = 'constants',
+  startText = '',
 }: {
   open: boolean;
   state: HttpState;
   onChange: (s: HttpState) => void;
   onClose: () => void;
   onTestAuth: (env: HttpEnvironment, config: OAuthConfig) => void;
+  startTab?: string; // 'json' opens it on "paste env.json"
+  startText?: string; // something pasted elsewhere (the .http editor)
 }) {
   const [tab, setTab] = useState<string>('constants');
   // env.json as text: paste WebStorm's http-client.env.json (and .private) here
   const [envText, setEnvText] = useState('');
+  useEffect(() => {
+    if (!open) return;
+    setTab(startTab);
+    if (startTab === 'json') setEnvText(startText);
+  }, [open, startTab, startText]);
   const openJson = () => {
     setEnvText(environmentsToJson(state.environments, state.constants));
     setTab('json');
@@ -611,7 +620,7 @@ function EnvironmentsDialog({
             ))}
             <Tab value="captured" label={`Captured (${captured.length})`} />
             <Tab value="options" label="Options" />
-            <Tab value="json" label="env.json" onClick={openJson} />
+            <Tab value="json" label="Paste env.json" onClick={openJson} />
           </Tabs>
           <Button size="small" startIcon={<AddIcon />} onClick={addEnv}>
             Environment
@@ -985,6 +994,15 @@ export default function HttpClientTool({
     null,
   );
   const [envOpen, setEnvOpen] = useState(false);
+  // open Environments on its "env.json" tab, with this text in it
+  const [envStart, setEnvStart] = useState<{ tab: string; text: string }>({
+    tab: 'constants',
+    text: '',
+  });
+  const openEnvironments = (startTab = 'constants', text = '') => {
+    setEnvStart({ tab: startTab, text });
+    setEnvOpen(true);
+  };
   const [curlOpen, setCurlOpen] = useState(false);
   const [bodyFromNote, setBodyFromNote] = useState(false);
   const [curlText, setCurlText] = useState('');
@@ -1083,7 +1101,8 @@ export default function HttpClientTool({
       const key = `${env!.id}:${id}`;
       const cached = tokens.current[key];
       if (!fresh && cached && cached.until > Date.now()) {
-        out[authTokenKey(id)] = cached.access;
+        out[authTokenKey(id)] =
+          config.useIdToken && cached.id ? cached.id : cached.access;
         out[authTokenKey(id, 'idToken')] = cached.id;
         // eslint-disable-next-line no-continue
         continue;
@@ -1100,7 +1119,8 @@ export default function HttpClientTool({
         // a little before it really expires; unknown = 50 min
         until: Date.now() + Math.max(30, (t.expiresIn || 3000) - 30) * 1000,
       };
-      out[authTokenKey(id)] = t.accessToken;
+      out[authTokenKey(id)] =
+        config.useIdToken && t.idToken ? t.idToken : t.accessToken;
       out[authTokenKey(id, 'idToken')] = t.idToken;
     }
     return { vars: out, error: null };
@@ -1531,7 +1551,7 @@ export default function HttpClientTool({
         <Tooltip title="Environments, constants, captured values, options">
           <IconButton
             size="small"
-            onClick={() => setEnvOpen(true)}
+            onClick={() => openEnvironments()}
             aria-label="Environments"
           >
             <TuneIcon fontSize="small" />
@@ -2058,12 +2078,22 @@ export default function HttpClientTool({
   const tabCount = (n: number) => (n ? ` (${n})` : '');
 
   const textCol = state.collections.find((c) => c.id === textFor);
+  let draftIsEnv = false;
+  if (textCol && /^\s*\{/.test(draft)) {
+    try {
+      draftIsEnv = readEnvFile(draft).environments.length > 0;
+    } catch (e) {
+      draftIsEnv = false;
+    }
+  }
   const outline = textCol ? parseHttpFileFull(draft) : null;
   const textView = textCol && outline && (
     <Box
       sx={{
         display: 'grid',
-        gridTemplateRows: 'auto minmax(0, 1.3fr) minmax(0, 1fr)',
+        gridTemplateRows: draftIsEnv
+          ? 'auto auto minmax(0, 1.3fr) minmax(0, 1fr)'
+          : 'auto minmax(0, 1.3fr) minmax(0, 1fr)',
         gap: 1.5,
         minHeight: 0,
         minWidth: 0,
@@ -2121,6 +2151,27 @@ export default function HttpClientTool({
           Visual
         </Button>
       </Paper>
+      {draftIsEnv && (
+        <Alert
+          severity="info"
+          action={
+            <Button
+              color="inherit"
+              size="small"
+              onClick={() => {
+                const text = draft;
+                setDraft('');
+                applyDraft('');
+                openEnvironments('json', text);
+              }}
+            >
+              Use as environments
+            </Button>
+          }
+        >
+          This looks like http-client.env.json, not a .http file.
+        </Alert>
+      )}
       <Box
         sx={{
           display: 'grid',
@@ -2593,6 +2644,21 @@ export default function HttpClientTool({
             />
           </MenuItem>,
           <MenuItem
+            key="pe"
+            onClick={() => {
+              closeMenu();
+              openEnvironments('json');
+            }}
+          >
+            <ListItemIcon>
+              <ContentPasteIcon fontSize="small" />
+            </ListItemIcon>
+            <ListItemText
+              primary="Paste http-client.env.json"
+              secondary="From WebStorm: environments, $shared, Security.Auth"
+            />
+          </MenuItem>,
+          <MenuItem
             key="ie"
             onClick={() => {
               closeMenu();
@@ -2824,6 +2890,8 @@ export default function HttpClientTool({
       />
       <EnvironmentsDialog
         open={envOpen}
+        startTab={envStart.tab}
+        startText={envStart.text}
         onTestAuth={testAuth}
         state={state}
         onChange={change}
