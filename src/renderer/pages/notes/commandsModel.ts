@@ -27,6 +27,7 @@ export interface CommandGroup {
   color?: PackageColor | null; // to tell packages apart at a glance
   icon?: PackageIcon | null; // database, frontend, functions...
   notify?: boolean; // desktop notification when it's done / failed / ready (default off)
+  parallel?: boolean; // async: every entry starts at once (default: one after another)
   commands: CliCommand[];
 }
 
@@ -147,6 +148,7 @@ export const parseState = (json: string | null | undefined): CommandsState => {
           color: PACKAGE_COLORS.includes(g.color) ? g.color : null,
           icon: PACKAGE_ICONS.includes(g.icon) ? g.icon : null,
           notify: g.notify === true,
+          parallel: g.parallel === true,
           commands: (Array.isArray(g.commands) ? g.commands : [])
             .filter((c: any) => c && typeof c.id === 'string')
             .map(
@@ -287,19 +289,33 @@ export const addPackageLink = (
   });
 };
 
-export interface ExpandedStep extends CliCommand {
-  section: string | null; // "Backend › Database" - the nested packages it comes from
+/** Where a step sits: per package level, its entry and whether that package is async. */
+export interface NestLevel {
+  parallel: boolean;
+  index: number;
 }
 
-/** The real steps of a list of entries: linked packages replaced by their steps. */
+export interface ExpandedStep extends CliCommand {
+  section: string | null; // "Backend › Database" - the nested packages it comes from
+  nest: NestLevel[]; // from the package that was run down to this step
+}
+
+/**
+ * The real steps of a list of entries: linked packages replaced by their steps. `nest`
+ * keeps the shape, so an async package runs its entries at once while a linked sync
+ * package inside it still runs its own steps in order.
+ */
 export const expandSteps = (
   state: CommandsState,
   commands: CliCommand[],
   section: string | null = null,
   seen: Set<string> = new Set(),
+  parallel = false,
+  nest: NestLevel[] = [],
 ): ExpandedStep[] =>
-  commands.flatMap((c): ExpandedStep[] => {
-    if (!c.packageId) return [{ ...c, section }];
+  commands.flatMap((c, index): ExpandedStep[] => {
+    const here = [...nest, { parallel, index }];
+    if (!c.packageId) return [{ ...c, section, nest: here }];
     const inner = findGroup(state, c.packageId);
     if (!inner || seen.has(inner.id)) return [];
     return expandSteps(
@@ -307,12 +323,20 @@ export const expandSteps = (
       inner.commands,
       section ? `${section} › ${inner.name}` : inner.name,
       new Set([...seen, inner.id]),
+      inner.parallel === true,
+      here,
     );
   });
 
 /** The steps a package runs (linked packages included). */
 export const packageSteps = (state: CommandsState, group: CommandGroup) =>
-  expandSteps(state, group.commands, null, new Set([group.id]));
+  expandSteps(
+    state,
+    group.commands,
+    null,
+    new Set([group.id]),
+    group.parallel === true,
+  );
 
 /** Packages that contain package `id`. */
 export const packageUsers = (state: CommandsState, id: string) =>

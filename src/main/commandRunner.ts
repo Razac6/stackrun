@@ -45,6 +45,9 @@ export interface RunStepInput {
   timeout?: number | null; // s a waited-for step may take before it's killed; 0 = no limit
   when?: RunCondition | null; // run it only if…
   section?: string | null; // the package it comes from inside another: "Stack › DB"
+  // where it sits, per package level: its entry and whether that package is async
+  // (missing = one plain list, run in order)
+  nest?: { parallel: boolean; index: number }[];
 }
 
 export type StepStatus =
@@ -498,7 +501,10 @@ const runStep = async (
   const check = input.ready || null;
   const cwd = expandHome(input.cwd);
   const prefix =
-    step.background && run.steps.length > 1 ? `[${input.name}] ` : '';
+    (step.background || input.nest?.some((l) => l.parallel)) &&
+    run.steps.length > 1
+      ? `[${input.name}] `
+      : '';
   const say = (text: string) => append(run, text, index);
 
   step.status = 'running';
@@ -779,13 +785,32 @@ const runStep = async (
   return end('ok');
 };
 
+interface Slot {
+  index: number; // in run.steps
+  nest: { parallel: boolean; index: number }[];
+}
+
+/** Consecutive slots of the same entry at `depth` (a linked package = one entry). */
+export const entriesAt = <T extends Slot>(slots: T[], depth: number) => {
+  const out: T[][] = [];
+  slots.forEach((s) => {
+    const last = out[out.length - 1];
+    if (last && last[0].nest[depth]?.index === s.nest[depth]?.index)
+      last.push(s);
+    else out.push([s]);
+  });
+  return out;
+};
+
 const drive = async (run: CommandRun, stopOnError: boolean) => {
   const { inputs } = pending.get(run.id)!;
-  for (let i = 0; i < inputs.length; i += 1) {
-    if (stopRequested.has(run.id)) break;
+  let failed = false;
+  const halted = () => stopRequested.has(run.id) || (failed && stopOnError);
+
+  const runOne = async (i: number) => {
+    if (halted()) return;
     let outcome: Outcome;
     try {
-      // eslint-disable-next-line no-await-in-loop
       outcome = await runStep(run, i, inputs[i]);
     } catch (e: any) {
       const step = run.steps[i];
@@ -795,8 +820,34 @@ const drive = async (run: CommandRun, stopOnError: boolean) => {
       append(run, `✖ ${step.tail}\n`, i);
       outcome = 'failed';
     }
-    if (outcome === 'failed' && stopOnError) break;
-  }
+    if (outcome === 'failed') failed = true;
+  };
+
+  // sync package: its entries one after another; async: all at once, done when all are
+  // (a step that fails stops what has not started yet - running ones finish)
+  const runLevel = async (slots: Slot[], depth: number): Promise<void> => {
+    const entries = entriesAt(slots, depth);
+    const runEntry = (entry: Slot[]) =>
+      entry.length === 1 && entry[0].nest.length <= depth + 1
+        ? runOne(entry[0].index)
+        : runLevel(entry, depth + 1);
+    if (slots[0]?.nest[depth]?.parallel) {
+      await Promise.all(entries.map(runEntry));
+      return;
+    }
+    for (let k = 0; k < entries.length; k += 1) {
+      if (halted()) break;
+      // eslint-disable-next-line no-await-in-loop
+      await runEntry(entries[k]);
+    }
+  };
+  await runLevel(
+    inputs.map((input, index) => ({
+      index,
+      nest: input.nest?.length ? input.nest : [{ parallel: false, index }],
+    })),
+    0,
+  );
   const why = stopRequested.has(run.id) ? 'stopped' : 'an earlier step failed';
   run.steps.forEach((s) => {
     if (s.status === 'pending') {
@@ -831,6 +882,12 @@ export const startRun = (
       when: normalizeCondition(s.when),
       timeout: Math.max(0, Number(s.timeout) || 0),
       section: s.section ? String(s.section) : null,
+      nest: Array.isArray(s.nest)
+        ? s.nest.slice(0, 32).map((l) => ({
+            parallel: !!l?.parallel,
+            index: Math.max(0, Math.floor(Number(l?.index) || 0)),
+          }))
+        : undefined,
     }));
   if (!steps.length) return null;
   counter += 1;

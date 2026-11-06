@@ -812,6 +812,7 @@ export default function CommandsTool({
       commands,
       null,
       new Set(group ? [group.id] : []),
+      group?.parallel === true,
     );
     const run = await window.electron.commands.run(
       steps.map((c) => ({
@@ -824,6 +825,7 @@ export default function CommandsTool({
         timeout: c.timeout || null,
         when: c.when || null,
         section: c.section,
+        nest: c.nest,
       })),
       {
         label,
@@ -1278,6 +1280,7 @@ export default function CommandsTool({
               noWrap
             >
               package · {steps.length} step{steps.length === 1 ? '' : 's'}
+              {inner.parallel && ' · async'}
               {!inner.stopOnError && ' · continues on error'}
             </Typography>
           </Box>
@@ -1718,6 +1721,28 @@ export default function CommandsTool({
                   sx={{ height: 20, fontSize: 11 }}
                 />
               )}
+            <Tooltip
+              title={
+                group.parallel
+                  ? 'Async: every step starts at once, the package is done when all are (click for one after another)'
+                  : 'Sync: steps run one after another (click to start them all at once)'
+              }
+            >
+              <Chip
+                size="small"
+                variant="outlined"
+                color={group.parallel ? 'primary' : 'default'}
+                label={group.parallel ? 'async' : 'sync'}
+                onClick={() =>
+                  change(
+                    updateGroup(state, group.id, {
+                      parallel: !group.parallel,
+                    }),
+                  )
+                }
+                sx={{ height: 20, fontSize: 11 }}
+              />
+            </Tooltip>
             <Tooltip
               title={
                 group.stopOnError

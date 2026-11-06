@@ -281,14 +281,16 @@ registerCommandIpc(ipcMain, {
 // ---------------- window ----------------
 const buildMenu = () => {
   const mac = process.platform === 'darwin';
-  // The search shortcut lives in the menu: on macOS ⌘ shortcuts go to the menu first,
-  // so a page-only listener never saw ⌘K there.
+  // The shortcuts themselves are caught in before-input-event (createWindow): that works
+  // on macOS whatever has the focus. The menu only shows them (registerAccelerator off,
+  // or one press would toggle the search twice).
   const go: Electron.MenuItemConstructorOptions = {
     label: 'Go',
     submenu: [
       {
         label: 'Search…',
         accelerator: 'CmdOrCtrl+K',
+        registerAccelerator: false,
         click: () => {
           showWindow();
           mainWindow?.webContents.send('app:search');
@@ -297,6 +299,7 @@ const buildMenu = () => {
       {
         label: 'Free a port…',
         accelerator: 'CmdOrCtrl+Shift+P',
+        registerAccelerator: false,
         click: () => {
           showWindow();
           mainWindow?.webContents.send('app:ports');
@@ -353,6 +356,20 @@ const createWindow = () => {
   // ...and never inside this window: a page from the internet must not get the app's
   // API (it can run commands)
   const home = resolveHtmlPath('index.html');
+  // ⌘K / Ctrl+K and ⌘⇧P / Ctrl+Shift+P, before the page (or a text field) gets them
+  mainWindow.webContents.on('before-input-event', (event, input) => {
+    if (input.type !== 'keyDown' || input.alt || input.isAutoRepeat) return;
+    const mod = process.platform === 'darwin' ? input.meta : input.control;
+    if (!mod) return;
+    const key = input.code || `Key${input.key.toUpperCase()}`;
+    if (key === 'KeyK' && !input.shift) {
+      event.preventDefault();
+      mainWindow?.webContents.send('app:search');
+    } else if (key === 'KeyP' && input.shift) {
+      event.preventDefault();
+      mainWindow?.webContents.send('app:ports');
+    }
+  });
   mainWindow.webContents.on('will-navigate', (event, url) => {
     if (url.split('#')[0] === home.split('#')[0]) return;
     event.preventDefault();

@@ -325,4 +325,44 @@ describe('export / import of packages', () => {
     ).toThrow();
     expect(() => importPackages(pkgs, '{"groups":[]}')).toThrow();
   });
+
+  it('keeps where each step sits, so an async package runs its entries at once', () => {
+    const nested = {
+      groups: [
+        {
+          id: 'db',
+          name: 'DB',
+          stopOnError: true,
+          collapsed: false,
+          commands: [cmd('a'), cmd('b')],
+        },
+        {
+          id: 'all',
+          name: 'All',
+          stopOnError: true,
+          collapsed: false,
+          parallel: true,
+          commands: [{ ...cmd('l'), packageId: 'db' }, cmd('c')],
+        },
+      ],
+    };
+    const steps = packageSteps(nested, nested.groups[1]);
+    expect(steps.map((s) => [s.id, s.nest])).toEqual([
+      [
+        'a',
+        [
+          { parallel: true, index: 0 },
+          { parallel: false, index: 0 },
+        ],
+      ],
+      [
+        'b',
+        [
+          { parallel: true, index: 0 },
+          { parallel: false, index: 1 },
+        ],
+      ],
+      ['c', [{ parallel: true, index: 1 }]],
+    ]);
+  });
 });

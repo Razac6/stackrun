@@ -1,4 +1,7 @@
-import { getOutput, rerun, startRun } from './commandRunner';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import { entriesAt, getOutput, rerun, startRun } from './commandRunner';
 
 jest.mock('electron', () => ({
   BrowserWindow: { getAllWindows: () => [] },
@@ -76,5 +79,73 @@ describe('commandRunner', () => {
     )!;
     await waitFor(() => /Failed in/.test(getOutput(run.id)));
     expect(getOutput(run.id, 0)).toContain('Working directory not found');
+  });
+  it('groups the slots of one entry (a linked package) together', () => {
+    const slots = [
+      {
+        index: 0,
+        nest: [
+          { parallel: true, index: 0 },
+          { parallel: false, index: 0 },
+        ],
+      },
+      {
+        index: 1,
+        nest: [
+          { parallel: true, index: 0 },
+          { parallel: false, index: 1 },
+        ],
+      },
+      { index: 2, nest: [{ parallel: true, index: 1 }] },
+    ];
+    expect(entriesAt(slots, 0).map((e) => e.map((s) => s.index))).toEqual([
+      [0, 1],
+      [2],
+    ]);
+  });
+
+  it('runs an async package at once, a sync package inside it in order', async () => {
+    // a step that prints "<name>-start", waits, prints "<name>-end"
+    const script = path
+      .join(os.tmpdir(), 'stackrun-step-test.js')
+      .split(path.sep)
+      .join('/');
+    fs.writeFileSync(
+      script,
+      "const [n, ms] = process.argv.slice(2); console.log(n + '-start'); setTimeout(() => console.log(n + '-end'), Number(ms));",
+    );
+    const step = (
+      id: string,
+      ms: number,
+      nest: { parallel: boolean; index: number }[],
+    ) => ({
+      id,
+      name: id,
+      command: `node "${script}" ${id} ${ms}`,
+      nest,
+    });
+    const run = startRun(
+      [
+        // entry 0: a linked sync package (a then b), entry 1: c - next to it
+        step('a', 1500, [
+          { parallel: true, index: 0 },
+          { parallel: false, index: 0 },
+        ]),
+        step('b', 200, [
+          { parallel: true, index: 0 },
+          { parallel: false, index: 1 },
+        ]),
+        step('c', 1500, [{ parallel: true, index: 1 }]),
+      ],
+      { label: 'async' },
+    )!;
+    await waitFor(() => /(Done|Failed|Stopped) in/.test(getOutput(run.id)));
+    const out = getOutput(run.id);
+    expect(out).toContain('Done in');
+    const at = (m: string) => out.indexOf(m);
+    // c started before a ended (at once), b only after a (in order)
+    expect(at('c-start')).toBeGreaterThan(-1);
+    expect(at('c-start')).toBeLessThan(at('a-end'));
+    expect(at('b-start')).toBeGreaterThan(at('a-end'));
   });
 });
