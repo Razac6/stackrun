@@ -12,6 +12,7 @@ import {
 } from './docker';
 import { DbKind, isSafeContainerRef, isSafeDbName } from './dockerTools';
 import {
+  mongoChanges,
   mongoDefaultDatabase,
   mongoDumpPlan,
   mongoListCollections,
@@ -22,6 +23,10 @@ import {
   mongoResult,
 } from './mongoTools';
 import {
+  changesData,
+  serverTiming,
+  median,
+  Timing,
   dumpPlan,
   restorePlan,
   ExecPlan,
@@ -522,10 +527,100 @@ export const renameSnapshot = (file: string, name: string) => {
   return true;
 };
 
+const cancelled = new Set<string>(); // a timing that was stopped
 export const cancelSql = (runId: string) => {
+  cancelled.add(runId);
+  setTimeout(() => cancelled.delete(runId), 60000);
   const child = running.get(runId);
   if (child) child.kill();
   return !!child;
+};
+
+/**
+ * Times a query: once to warm up, then `times` runs; the median is what gets compared.
+ * Postgres reading queries use the server's own clock (EXPLAIN ANALYZE); otherwise the
+ * round trip minus a ping (docker exec + connecting), measured in between. A change to
+ * the data is timed in a transaction that is rolled back (SQL), not at all in MongoDB.
+ */
+export const timeSql = async (
+  runId: string,
+  containerId: string,
+  db: string,
+  sql: string,
+  schema: string | undefined,
+  times = 5,
+): Promise<Timing> => {
+  const none = { samples: [], ms: 0, minMs: 0, maxMs: 0, overheadMs: 0 };
+  const failed = (error: string): Timing => ({
+    ok: false,
+    error,
+    method: 'roundtrip',
+    ...none,
+  });
+  if (!isSafeContainerRef(containerId))
+    return failed('Pick a database container');
+  if (!sql.trim()) return failed('Nothing to time');
+  const { container } = await inspectContainer(containerId);
+  if (!isClientDb(container?.db)) return failed(NOT_A_DB);
+  const mongo = container.db === 'mongo';
+  const change = mongo ? mongoChanges(sql) : changesData(sql);
+  if (mongo && change)
+    return failed(
+      'Only reading queries can be timed in MongoDB - each run would change the data',
+    );
+  const dry = change; // SQL: rolled back each time
+  const run = (text: string, rolledBack = dry) =>
+    runSql(runId, containerId, db, text, 120000, rolledBack, schema);
+  cancelled.delete(runId);
+
+  // every cell, the header too (psql's "QUERY PLAN" header can be read as a status)
+  const cellsOf = (r: SqlResult) => [...r.columns, ...r.rows.flat()];
+  const viaServer = mongo ? null : serverTiming(container.db, sql);
+  let server = !!viaServer;
+  let warm = await run(viaServer ? viaServer.sql : sql);
+  // an older server without EXPLAIN ANALYZE: round trips then
+  if (viaServer && (!warm.ok || viaServer.read(cellsOf(warm)) === null)) {
+    server = false;
+    warm = await run(sql);
+  }
+  if (!warm.ok) return failed(warm.message);
+  const samples: number[] = [];
+  const pings: number[] = [];
+  // eslint-disable-next-line no-plusplus
+  for (let i = 0; i < times; i++) {
+    if (cancelled.has(runId)) return failed('Stopped');
+    if (server && viaServer) {
+      // eslint-disable-next-line no-await-in-loop
+      const r = await run(viaServer.sql);
+      const t = r.ok ? viaServer.read(cellsOf(r)) : null;
+      if (t === null) return failed(r.ok ? 'No timing in EXPLAIN' : r.message);
+      samples.push(t);
+    } else {
+      // eslint-disable-next-line no-await-in-loop
+      const r = await run(sql);
+      if (!r.ok) return failed(r.message);
+      samples.push(r.timeMs);
+      // eslint-disable-next-line no-await-in-loop
+      const p = await run(
+        mongo ? 'db.runCommand({ ping: 1 })' : 'SELECT 1',
+        false,
+      );
+      if (p.ok) pings.push(p.timeMs);
+    }
+  }
+  const overheadMs = server ? 0 : median(pings);
+  const net = samples.map((s) => Math.max(0, s - overheadMs));
+  const round = (n: number) => Math.round(n * 100) / 100;
+  return {
+    ok: true,
+    error: null,
+    method: server ? 'server' : 'roundtrip',
+    ms: round(median(net)),
+    minMs: round(Math.min(...net)),
+    maxMs: round(Math.max(...net)),
+    samples: net.map(round),
+    overheadMs: round(overheadMs),
+  };
 };
 
 /** Running database containers the DB Client can use. */
@@ -667,4 +762,15 @@ export const registerSqlIpc = (ipcMain: IpcMain) => {
     deleteSnapshot(String(file)),
   );
   ipcMain.handle('sql:cancel', (e, runId: string) => cancelSql(String(runId)));
+  ipcMain.handle(
+    'sql:time',
+    (e, runId: string, id: string, db: string, sql: string, schema?: string) =>
+      timeSql(
+        String(runId),
+        String(id),
+        String(db || ''),
+        String(sql || ''),
+        schema ? String(schema) : undefined,
+      ),
+  );
 };

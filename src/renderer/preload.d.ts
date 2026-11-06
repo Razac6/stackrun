@@ -1,7 +1,10 @@
 import type { DockerStatus } from '../main/docker';
 import type { HttpResult, HttpSend } from '../main/httpClient';
+import type { HistoryEntry } from '../main/httpHistory';
+import type { TracingStatus } from '../main/tracing';
+import type { ReportedSpan } from '../main/traceModel';
 import type { OAuthRequest, OAuthToken } from '../main/oauth';
-import type { SqlResult } from '../main/sqlTools';
+import type { SqlResult, Timing } from '../main/sqlTools';
 import type { DockerfileRecipe } from '../main/dockerfileTools';
 import type { ComposeRun } from '../main/composeTools';
 import type { PortInfo } from '../main/ports';
@@ -59,6 +62,19 @@ export interface IElectronAPI {
       force?: boolean,
     ) => Promise<boolean>;
     runs: () => Promise<RunSnapshot[]>;
+    logsBetween: (
+      from: number,
+      to: number,
+    ) => Promise<
+      {
+        runId: string;
+        step: number;
+        name: string;
+        command: string;
+        running: boolean;
+        lines: { at: number; text: string }[];
+      }[]
+    >;
     output: (runId: string, step?: number | null) => Promise<string>;
     rerun: (
       runId: string,
@@ -130,6 +146,17 @@ export interface IElectronAPI {
   http: {
     send: (req: HttpSend) => Promise<HttpResult>;
     cancel: (id: string) => Promise<boolean>;
+    history: () => Promise<HistoryEntry[]>;
+    addHistory: (entry: HistoryEntry) => Promise<boolean>;
+    deleteHistory: (id: string) => Promise<boolean>;
+    clearHistory: () => Promise<boolean>;
+  };
+  tracing: {
+    status: () => Promise<TracingStatus>;
+    start: () => Promise<TracingStatus>;
+    stop: () => Promise<TracingStatus>;
+    report: (span: ReportedSpan) => Promise<boolean>;
+    get: (traceId: string) => Promise<{ trace: any; error: string | null }>;
   };
   ports: {
     who: (port: number) => Promise<PortInfo>;
@@ -181,6 +208,13 @@ export interface IElectronAPI {
       schema?: string,
     ) => Promise<SqlResult>;
     cancel: (runId: string) => Promise<boolean>;
+    time: (
+      runId: string,
+      id: string,
+      db: string,
+      sql: string,
+      schema?: string,
+    ) => Promise<Timing>;
     snapshots: (container?: string, db?: string) => Promise<Snapshot[]>;
     renameSnapshot: (file: string, name: string) => Promise<boolean>;
     snapshot: (

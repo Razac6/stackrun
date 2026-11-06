@@ -45,6 +45,8 @@ contextBridge.exposeInMainWorld('electron', {
     stopStep: (runId: string, index: number, force?: boolean) =>
       ipcRenderer.invoke('commands:stop-step', runId, index, force),
     runs: () => ipcRenderer.invoke('commands:runs'),
+    logsBetween: (from: number, to: number) =>
+      ipcRenderer.invoke('commands:logs-between', from, to),
     output: (runId: string, step?: number | null) =>
       ipcRenderer.invoke('commands:output', runId, step),
     rerun: (runId: string, options?: any) =>
@@ -83,6 +85,18 @@ contextBridge.exposeInMainWorld('electron', {
   http: {
     send: (req: any) => ipcRenderer.invoke('http:send', req),
     cancel: (id: string) => ipcRenderer.invoke('http:cancel', id),
+    history: () => ipcRenderer.invoke('http:history'),
+    addHistory: (entry: any) => ipcRenderer.invoke('http:history-add', entry),
+    deleteHistory: (id: string) =>
+      ipcRenderer.invoke('http:history-delete', id),
+    clearHistory: () => ipcRenderer.invoke('http:history-clear'),
+  },
+  tracing: {
+    status: () => ipcRenderer.invoke('tracing:status'),
+    start: () => ipcRenderer.invoke('tracing:start'),
+    stop: () => ipcRenderer.invoke('tracing:stop'),
+    report: (span: any) => ipcRenderer.invoke('tracing:report', span),
+    get: (traceId: string) => ipcRenderer.invoke('tracing:get', traceId),
   },
   ports: {
     who: (port: number) => ipcRenderer.invoke('ports:who', port),
@@ -121,6 +135,13 @@ contextBridge.exposeInMainWorld('electron', {
       schema?: string,
     ) => ipcRenderer.invoke('sql:run', runId, id, db, sql, dryRun, schema),
     cancel: (runId: string) => ipcRenderer.invoke('sql:cancel', runId),
+    time: (
+      runId: string,
+      id: string,
+      db: string,
+      sql: string,
+      schema?: string,
+    ) => ipcRenderer.invoke('sql:time', runId, id, db, sql, schema),
     snapshots: (container?: string, db?: string) =>
       ipcRenderer.invoke('sql:snapshots', container, db),
     snapshot: (id: string, db: string, name?: string, auto?: boolean) =>

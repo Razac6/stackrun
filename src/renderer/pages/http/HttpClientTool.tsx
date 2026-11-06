@@ -59,6 +59,8 @@ import ScheduleIcon from '@mui/icons-material/Schedule';
 import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import ErrorIcon from '@mui/icons-material/Error';
 import RemoveCircleOutlineIcon from '@mui/icons-material/RemoveCircleOutline';
+import HistoryIcon from '@mui/icons-material/History';
+import AccountTreeOutlinedIcon from '@mui/icons-material/AccountTreeOutlined';
 import type { HttpResult } from '../../../main/httpClient';
 import {
   Auth,
@@ -104,6 +106,10 @@ import {
   requestToHttp,
 } from './httpModel';
 import KVTable from './KVTable';
+import HttpHistoryDialog from './HttpHistoryDialog';
+import TracePanel from './TracePanel';
+import { newTraceContext } from '../../../main/traceModel';
+import { maskSecrets } from './httpHistoryModel';
 import NotePicker, { noteText } from '../../components/NotePicker';
 import CodeArea from '../notes/CodeArea';
 import JsonFoldView from '../notes/JsonFoldView';
@@ -133,6 +139,7 @@ interface Shown {
     body?: string;
   };
   captured: Record<string, string>;
+  traceId?: string | null; // sent with "Trace" on
   captureFailed: string[];
   at: number;
 }
@@ -979,6 +986,9 @@ export default function HttpClientTool({
   const [state, setState] = useState<HttpState>(() => parseState(null));
   const [loaded, setLoaded] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  // picked in search before the saved requests were loaded (this tool mounts on the click)
+  const wanted = useRef<string | null>(openRequest?.id ?? null);
   const [settingsFor, setSettingsFor] = useState<string | null>(null); // collection settings
   // a collection open as its .http file (WebStorm-style), and the text being edited
   const [textFor, setTextFor] = useState<string | null>(null);
@@ -1032,7 +1042,11 @@ export default function HttpClientTool({
       .then((s) => {
         const parsed = parseState(s?.[SETTINGS_KEY]);
         setState(parsed);
-        setSelected(parsed.collections[0]?.requests[0]?.id ?? null);
+        setSelected(
+          wanted.current && findRequest(parsed, wanted.current)
+            ? wanted.current
+            : parsed.collections[0]?.requests[0]?.id ?? null,
+        );
       })
       .finally(() => setLoaded(true));
   }, []);
@@ -1048,8 +1062,29 @@ export default function HttpClientTool({
 
   useEffect(() => {
     if (!openRequest) return;
+    wanted.current = openRequest.id;
     setSelected(openRequest.id);
     setSettingsFor(null);
+    setTextFor(null);
+    // its collection opens, and the row comes into view
+    const latest = stateRef.current;
+    const col = latest.collections.find((c) =>
+      c.requests.some((r) => r.id === openRequest.id),
+    );
+    if (col?.collapsed)
+      change({
+        ...latest,
+        collections: latest.collections.map((c) =>
+          c.id === col.id ? { ...c, collapsed: false } : c,
+        ),
+      });
+    setTimeout(
+      () =>
+        document
+          .querySelector(`[data-request-id="${openRequest.id}"]`)
+          ?.scrollIntoView({ block: 'nearest' }),
+      150,
+    );
   }, [openRequest]);
 
   const found = findRequest(state, selected);
@@ -1169,6 +1204,15 @@ export default function HttpClientTool({
       }));
       return false;
     }
+    // "Trace" on: a W3C traceparent, so the services' spans join one trace
+    const trace =
+      req.trace &&
+      !built.headers.some(([k]) => k.toLowerCase() === 'traceparent')
+        ? newTraceContext()
+        : null;
+    if (trace)
+      built.headers = [...built.headers, ['traceparent', trace.traceparent]];
+    const startedAt = Date.now();
     const result = await window.electron.http.send({
       id: req.id,
       method: built.method,
@@ -1195,6 +1239,33 @@ export default function HttpClientTool({
         change({ ...latest, captured: { ...latest.captured, ...captured } });
       }
     }
+    // Stackrun's own span: the root of the trace (where the request came from)
+    if (trace)
+      window.electron.tracing.report({
+        traceId: trace.traceId,
+        spanId: trace.spanId,
+        method: built.method,
+        url: built.url,
+        startMs: startedAt,
+        endMs: Date.now(),
+        status: result.status || 0,
+        error: result.error,
+      });
+    window.electron.http.addHistory({
+      traceId: trace?.traceId || null,
+      id: `h-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      at: Date.now(),
+      requestId: req.id,
+      name: req.name,
+      collection: col?.name || '',
+      sent: {
+        method: built.method,
+        url: built.url,
+        headers: maskSecrets(built.headers),
+        body: built.body || '',
+      },
+      result,
+    });
     setResponses((m) => ({
       ...m,
       [req.id]: {
@@ -1203,6 +1274,7 @@ export default function HttpClientTool({
         captured,
         captureFailed,
         at: Date.now(),
+        traceId: trace?.traceId || null,
       },
     }));
     return !result.error && result.status < 400;
@@ -1548,6 +1620,15 @@ export default function HttpClientTool({
             </MenuItem>
           ))}
         </Select>
+        <Tooltip title="History: the last 100 requests with their responses">
+          <IconButton
+            size="small"
+            onClick={() => setHistoryOpen(true)}
+            aria-label="History"
+          >
+            <HistoryIcon fontSize="small" />
+          </IconButton>
+        </Tooltip>
         <Tooltip title="Environments, constants, captured values, options">
           <IconButton
             size="small"
@@ -1748,6 +1829,7 @@ export default function HttpClientTool({
                       e.dataTransfer.effectAllowed = 'move';
                     }}
                     onDragEnd={() => setDragId(null)}
+                    data-request-id={r.id}
                     onDragOver={(e) => {
                       if (dragId && dragId !== r.id) {
                         e.preventDefault();
@@ -1912,8 +1994,9 @@ export default function HttpClientTool({
   );
 
   // ---------------- right: request + response ----------------
-  const responsePanel = (req: HttpRequest) => {
-    const res = responses[req.id];
+  const responsePanel = (req: HttpRequest) =>
+    responseView(responses[req.id], !!sending[req.id]);
+  const responseView = (res: Shown | undefined, waiting: boolean) => {
     const result = res?.result;
     let parsedJson: unknown;
     let isJson = false;
@@ -1931,7 +2014,7 @@ export default function HttpClientTool({
       >
         {!result && (
           <Typography variant="body2" color="text.secondary" sx={{ m: 'auto' }}>
-            {sending[req.id] ? 'Sending…' : 'Send it to see the response here.'}
+            {waiting ? 'Sending…' : 'Send it to see the response here.'}
           </Typography>
         )}
         {result && (
@@ -1997,9 +2080,12 @@ export default function HttpClientTool({
               </Tooltip>
             </Box>
             {result.error ? (
-              <Alert severity="error" sx={{ mt: 1 }}>
-                {result.error}
-              </Alert>
+              <Box sx={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
+                <Alert severity="error" sx={{ mt: 1 }}>
+                  {result.error}
+                </Alert>
+                {res?.traceId && <TracePanel traceId={res.traceId} />}
+              </Box>
             ) : (
               <>
                 <Tabs
@@ -2014,6 +2100,15 @@ export default function HttpClientTool({
                     sx={{ minHeight: 34 }}
                   />
                   <Tab value="sent" label="Sent" sx={{ minHeight: 34 }} />
+                  {res?.traceId && (
+                    <Tab
+                      value="trace"
+                      label="Trace"
+                      icon={<AccountTreeOutlinedIcon sx={{ fontSize: 16 }} />}
+                      iconPosition="start"
+                      sx={{ minHeight: 34 }}
+                    />
+                  )}
                 </Tabs>
                 <Box sx={{ flex: 1, minHeight: 0, overflow: 'auto', pt: 1 }}>
                   {resTab === 'body' &&
@@ -2051,6 +2146,9 @@ export default function HttpClientTool({
                         </Box>
                       </Box>
                     ))}
+                  {resTab === 'trace' && res?.traceId && (
+                    <TracePanel traceId={res.traceId} />
+                  )}
                   {resTab === 'sent' && (
                     <CodeArea
                       value={[
@@ -2403,6 +2501,30 @@ export default function HttpClientTool({
               ) : undefined,
             }}
           />
+          <Tooltip
+            title={
+              request.trace
+                ? 'Trace on: sends a traceparent header - see how the request went through your services (response → Trace)'
+                : 'Trace this request through your services (OpenTelemetry)'
+            }
+          >
+            <IconButton
+              color={request.trace ? 'primary' : 'default'}
+              aria-pressed={request.trace}
+              aria-label="Trace this request"
+              onClick={() => {
+                editReq({ trace: !request.trace });
+                if (!request.trace) setResTab('trace');
+              }}
+              sx={{
+                flexShrink: 0,
+                alignSelf: 'center',
+                bgcolor: request.trace ? 'action.selected' : undefined,
+              }}
+            >
+              <AccountTreeOutlinedIcon fontSize="small" />
+            </IconButton>
+          </Tooltip>
           <Tooltip
             title={sending[request.id] ? 'Cancel' : 'Send (Ctrl/⌘ + Enter)'}
           >
@@ -2929,6 +3051,31 @@ export default function HttpClientTool({
           </Button>
         </DialogActions>
       </Dialog>
+
+      <HttpHistoryDialog
+        open={historyOpen}
+        onClose={() => setHistoryOpen(false)}
+        renderResponse={(entry) =>
+          responseView(
+            {
+              result: entry.result,
+              sent: entry.sent,
+              captured: {},
+              captureFailed: [],
+              at: entry.at,
+              traceId: entry.traceId || null,
+            },
+            false,
+          )
+        }
+        canOpen={(id) => !!findRequest(state, id)}
+        onOpenRequest={(id) => {
+          setHistoryOpen(false);
+          setSelected(id);
+          setSettingsFor(null);
+          setTextFor(null);
+        }}
+      />
 
       <BottomToast
         text={toast?.text || null}

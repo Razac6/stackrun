@@ -63,6 +63,7 @@ export interface HttpRequest {
   captures: Capture[];
   delayMs: number; // wait before it when the collection runs
   skip: boolean; // left out of a collection run
+  trace: boolean; // sends a traceparent: its trace across the services is shown
 }
 
 export interface HttpCollection {
@@ -143,6 +144,7 @@ export const newRequest = (
   captures: [],
   delayMs: 0,
   skip: false,
+  trace: false,
   ...partial,
 });
 
@@ -284,6 +286,7 @@ const asRequest = (r: any): HttpRequest =>
       : [],
     delayMs: Math.max(0, Number(r?.delayMs) || 0),
     skip: !!r?.skip,
+    trace: !!r?.trace,
   });
 
 export const parseState = (raw: unknown): HttpState => {
@@ -1213,7 +1216,7 @@ export const applyHttpText = (
     variables,
     requests: requests.map((r, i) => {
       const old = collection.requests[i];
-      return old ? { ...r, id: old.id, skip: old.skip } : r;
+      return old ? { ...r, id: old.id, skip: old.skip, trace: old.trace } : r;
     }),
   };
 };

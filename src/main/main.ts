@@ -18,7 +18,9 @@ import { containerReady, registerDockerIpc } from './docker';
 import { registerCommandIpc, RunNotice, stopAllRuns } from './commandRunner';
 import { Store } from './store';
 import { registerHttpIpc } from './httpClient';
+import { flushHistory, registerHttpHistoryIpc } from './httpHistory';
 import { registerOAuthIpc } from './oauth';
+import { registerTracingIpc } from './tracing';
 import { registerSqlIpc, setSnapshotDir } from './sqlRunner';
 import { registerDockerfileIpc } from './dockerfileRunner';
 import { registerComposeIpc } from './composeRunner';
@@ -267,6 +269,8 @@ ipcMain.handle(
 );
 
 registerHttpIpc(ipcMain);
+registerTracingIpc(ipcMain);
+registerHttpHistoryIpc(ipcMain, app.getPath('userData'));
 registerOAuthIpc(ipcMain);
 registerSqlIpc(ipcMain);
 registerDockerfileIpc(ipcMain);
@@ -394,7 +398,10 @@ app.on('activate', () => {
   if (mainWindow === null) createWindow();
   else showWindow();
 });
-app.on('will-quit', () => stopAllRuns());
+app.on('will-quit', () => {
+  stopAllRuns();
+  flushHistory();
+});
 
 app
   .whenReady()

@@ -89,7 +89,7 @@ const run = (
     );
   });
 
-const docker = (args: string[], timeout?: number) =>
+export const docker = (args: string[], timeout?: number) =>
   run('docker', args, timeout);
 
 export interface DockerStatus {

@@ -443,3 +443,81 @@ export const listTablesSql = (kind: DbKind, schema = 'public') =>
 
 export const listSchemasSql = () =>
   "SELECT nspname FROM pg_catalog.pg_namespace WHERE nspname NOT IN ('pg_catalog', 'information_schema') AND nspname NOT LIKE 'pg\\_toast%' AND nspname NOT LIKE 'pg\\_temp%' ORDER BY nspname <> 'public', 1;";
+
+// ---------------- timing a query (compare before / after a change) ----------------
+export interface Timing {
+  ok: boolean;
+  error: string | null;
+  method: 'server' | 'roundtrip'; // the database's own clock, or round trips minus a ping
+  ms: number; // the median - what is compared
+  minMs: number;
+  maxMs: number;
+  samples: number[];
+  overheadMs: number; // docker exec + connecting (roundtrip only)
+}
+
+export const median = (list: number[]) => {
+  if (!list.length) return 0;
+  const s = [...list].sort((a, b) => a - b);
+  const mid = Math.floor(s.length / 2);
+  return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+};
+
+/** Postgres: the query wrapped in EXPLAIN ANALYZE (one reading statement only). */
+export const explainAnalyzeSql = (sql: string) =>
+  `EXPLAIN (ANALYZE, FORMAT JSON) ${sql.trim().replace(/;\s*$/, '')};`;
+
+/** Planning + execution time (ms) from what EXPLAIN (ANALYZE, FORMAT JSON) printed. */
+export const explainTime = (json: string): number | null => {
+  try {
+    const plan = JSON.parse(json)?.[0];
+    const exec = Number(plan?.['Execution Time']);
+    if (!Number.isFinite(exec)) return null;
+    return exec + (Number(plan['Planning Time']) || 0);
+  } catch (e) {
+    return null;
+  }
+};
+
+/**
+ * How the database itself times one statement, when it can: Postgres EXPLAIN ANALYZE
+ * (reads and writes - a write runs rolled back), MySQL 8 EXPLAIN ANALYZE, MariaDB
+ * ANALYZE FORMAT=JSON (reads). `read` takes every cell of the result.
+ */
+export const serverTiming = (
+  kind: DbKind,
+  sql: string,
+): { sql: string; read: (cells: string[]) => number | null } | null => {
+  const stmt = sql.trim().replace(/;\s*$/, '');
+  if (!stmt || stmt.includes(';')) return null; // one statement only
+  const reads =
+    returnsRows(stmt) &&
+    !/^\s*(show|describe|desc|explain|pragma)\b/i.test(stmt);
+  const writes = /^\s*(insert|update|delete|merge)\b/i.test(stmt);
+  if (kind === 'postgres' && (reads || writes))
+    return {
+      sql: explainAnalyzeSql(stmt),
+      read: (cells) => {
+        const json = cells.find((c) => c.trim().startsWith('['));
+        return json ? explainTime(json) : null;
+      },
+    };
+  if (kind === 'mysql' && reads)
+    return {
+      sql: `EXPLAIN ANALYZE ${stmt};`,
+      // the top node of the tree: "(actual time=0.05..12.3 rows=…)"
+      read: (cells) => {
+        const m = /actual time=[\d.]+\.\.([\d.]+)/.exec(cells.join('\n'));
+        return m ? Number(m[1]) : null;
+      },
+    };
+  if (kind === 'mariadb' && reads)
+    return {
+      sql: `ANALYZE FORMAT=JSON ${stmt};`,
+      read: (cells) => {
+        const m = /"r_total_time_ms"\s*:\s*([\d.]+)/.exec(cells.join('\n'));
+        return m ? Number(m[1]) : null;
+      },
+    };
+  return null;
+};

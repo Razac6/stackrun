@@ -241,6 +241,37 @@ const publish = (run: CommandRun) => send('commands:run', snapshot(run));
 
 const stepOutputs = new Map<string, string[]>(); // runId -> output of each step
 
+// every line of a step with the time it came: the logs of a service while a traced
+// request went through it (HTTP Client → Trace)
+export interface LogLine {
+  at: number;
+  text: string;
+}
+const MAX_LOG_LINES = 5000; // per step
+const lineLogs = new Map<string, LogLine[]>(); // `${runId}:${step}`
+const partialLines = new Map<string, string>(); // a line not ended yet
+const keepLines = (runId: string, step: number, text: string) => {
+  const key = `${runId}:${step}`;
+  const parts = `${partialLines.get(key) || ''}${text}`.split(/\r?\n/);
+  partialLines.set(key, parts.pop() || '');
+  if (!parts.length) return;
+  const at = Date.now();
+  const list = lineLogs.get(key) || [];
+  parts.forEach((line) => {
+    if (line.trim()) list.push({ at, text: line.slice(0, 2000) });
+  });
+  if (list.length > MAX_LOG_LINES) list.splice(0, list.length - MAX_LOG_LINES);
+  lineLogs.set(key, list);
+};
+const dropLines = (runId: string) => {
+  [...lineLogs.keys()]
+    .filter((k) => k.startsWith(`${runId}:`))
+    .forEach((k) => {
+      lineLogs.delete(k);
+      partialLines.delete(k);
+    });
+};
+
 const cap = (text: string) =>
   text.length > MAX_OUTPUT
     ? `…(trimmed)\n${text.slice(-MAX_OUTPUT * 0.8)}`
@@ -261,12 +292,42 @@ const append = (run: CommandRun, text: string, stepIndex?: number) => {
     const outputs = stepOutputs.get(run.id) || [];
     outputs[stepIndex] = cap((outputs[stepIndex] || '') + clean);
     stepOutputs.set(run.id, outputs);
+    keepLines(run.id, stepIndex, clean);
   }
   send('commands:output', {
     runId: run.id,
     chunk: clean,
     step: stepIndex ?? null,
   });
+};
+
+/** What every step printed between two moments (the steps that printed something). */
+export const logsBetween = (fromMs: number, toMs: number, perStep = 400) => {
+  const out: {
+    runId: string;
+    step: number;
+    name: string;
+    command: string;
+    running: boolean;
+    lines: LogLine[];
+  }[] = [];
+  runs.forEach((run) => {
+    run.steps.forEach((st, i) => {
+      const lines = (lineLogs.get(`${run.id}:${i}`) || []).filter(
+        (l) => l.at >= fromMs && l.at <= toMs,
+      );
+      if (lines.length)
+        out.push({
+          runId: run.id,
+          step: i,
+          name: st.name,
+          command: st.command,
+          running: st.status === 'running',
+          lines: lines.slice(-perStep),
+        });
+    });
+  });
+  return out;
 };
 
 export const getOutput = (runId: string, stepIndex?: number | null) => {
@@ -1014,6 +1075,7 @@ export const startRun = (
     runs.delete(oldest.id);
     pending.delete(oldest.id);
     stepOutputs.delete(oldest.id);
+    dropLines(oldest.id);
   }
   if (options.intro) append(run, `${options.intro}\n\n`);
   drive(run, options.stopOnError !== false);
@@ -1204,6 +1266,9 @@ export const registerCommandIpc = (
   ipcMain.handle('commands:runs', () =>
     [...runs.values()].map(snapshot).sort((a, b) => b.startedAt - a.startedAt),
   );
+  ipcMain.handle('commands:logs-between', (event, from: number, to: number) =>
+    logsBetween(Number(from), Number(to)),
+  );
   ipcMain.handle(
     'commands:output',
     (event, runId: string, step?: number | null) =>
@@ -1224,6 +1289,7 @@ export const registerCommandIpc = (
         runs.delete(r.id);
         pending.delete(r.id);
         stepOutputs.delete(r.id);
+        dropLines(r.id);
       });
     return true;
   });

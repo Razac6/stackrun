@@ -45,6 +45,11 @@ import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import TableChartOutlinedIcon from '@mui/icons-material/TableChartOutlined';
 import NotesIcon from '@mui/icons-material/DescriptionOutlined';
 import SaveOutlinedIcon from '@mui/icons-material/SaveOutlined';
+import SpeedIcon from '@mui/icons-material/Speed';
+import FilterListIcon from '@mui/icons-material/FilterList';
+import SearchIcon from '@mui/icons-material/Search';
+import InputBase from '@mui/material/InputBase';
+import SqlTimingDialog from './SqlTimingDialog';
 import type { SqlResult } from '../../../main/sqlTools';
 import { changesData } from '../../../main/sqlTools';
 import {
@@ -57,7 +62,7 @@ import CodeArea from '../notes/CodeArea';
 import BottomToast from '../notes/BottomToast';
 import { MONO_FONT } from '../notes/highlight';
 import NotePicker, { noteText } from '../../components/NotePicker';
-import { SQL_SETTINGS_KEY, statementAt, toCsv } from './sqlModel';
+import { filterRows, SQL_SETTINGS_KEY, statementAt, toCsv } from './sqlModel';
 import { checkSql, formatSql, repairSql } from '../notes/sqlTools';
 
 interface Target {
@@ -124,6 +129,11 @@ export default function SqlClientTool() {
   const [tables, setTables] = useState<string[]>([]);
   const [versions, setVersions] = useState<Snapshot[]>([]);
   const [result, setResult] = useState<SqlResult | null>(null);
+  // searching the result: any cell, and a filter per column
+  const [search, setSearch] = useState('');
+  const [colFilters, setColFilters] = useState<Record<number, string>>({});
+  const [showFilters, setShowFilters] = useState(false);
+  const [timing, setTiming] = useState<string | null>(null); // the query being timed
   const [ran, setRan] = useState('');
   const [busy, setBusy] = useState<string | null>(null); // what is happening right now
   const [toast, setToast] = useState<{ text: string; error?: boolean } | null>(
@@ -321,15 +331,17 @@ export default function SqlClientTool() {
     if (change && !dryRun) loadTables();
   };
 
-  const runAtCursor = (el: HTMLTextAreaElement | null) => {
+  /** The selection, or the statement under the cursor. */
+  const statementFor = (el: HTMLTextAreaElement | null) => {
     const at = el?.selectionStart ?? text.length;
     const stmt = isMongo ? mongoStatementAt(text, at) : statementAt(text, at);
     const selected =
       el && el.selectionEnd > el.selectionStart
         ? text.slice(el.selectionStart, el.selectionEnd)
         : '';
-    run(selected || stmt?.text || '');
+    return selected || stmt?.text || '';
   };
+  const runAtCursor = (el: HTMLTextAreaElement | null) => run(statementFor(el));
   const editorRef = useRef<HTMLDivElement>(null);
   const textarea = () => editorRef.current?.querySelector('textarea') || null;
 
@@ -379,6 +391,17 @@ export default function SqlClientTool() {
       !fixed.ok,
     );
   };
+
+  // a new result starts unfiltered
+  useEffect(() => {
+    setColFilters({});
+  }, [result]);
+  const visible = useMemo(
+    () => (result ? filterRows(result.rows, search, colFilters) : []),
+    [result, search, colFilters],
+  );
+  const filtering =
+    !!search.trim() || Object.values(colFilters).some((f) => f.trim());
 
   const columnsWidth = useMemo(
     () =>
@@ -659,6 +682,22 @@ export default function SqlClientTool() {
               </Button>
             </span>
           </Tooltip>
+          <Tooltip title="Time the statement under the cursor - compare it before and after a change">
+            <span>
+              <Button
+                size="small"
+                startIcon={<SpeedIcon />}
+                disabled={!!busy || !ready}
+                onClick={() => {
+                  const q = statementFor(textarea());
+                  if (q.trim()) setTiming(q);
+                  else say('Nothing to time', true);
+                }}
+              >
+                Time it
+              </Button>
+            </span>
+          </Tooltip>
           {busy && (
             <Button
               size="small"
@@ -832,18 +871,70 @@ export default function SqlClientTool() {
                   sx={{ flex: 1, fontFamily: MONO_FONT }}
                 >
                   {result.timeMs} ms
+                  {filtering
+                    ? ` · ${visible.length} of ${result.rows.length} shown`
+                    : ''}
                   {result.truncated
                     ? ` · first ${result.rows.length} rows shown`
                     : ''}{' '}
                   · {ran.replace(/\s+/g, ' ').slice(0, 120)}
                 </Typography>
+                {result.ok && !!result.columns.length && (
+                  <>
+                    <Box
+                      sx={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 0.5,
+                        px: 1,
+                        border: 1,
+                        borderColor: 'divider',
+                        borderRadius: 1,
+                        width: 220,
+                      }}
+                    >
+                      <SearchIcon
+                        sx={{ fontSize: 16, color: 'text.secondary' }}
+                      />
+                      <InputBase
+                        value={search}
+                        onChange={(e) => setSearch(e.target.value)}
+                        placeholder="Search the rows"
+                        inputProps={{ 'aria-label': 'Search the rows' }}
+                        sx={{ fontSize: 12.5, flex: 1 }}
+                      />
+                    </Box>
+                    <Tooltip title="Filter by column: text, =exact, !not, >10, <10, null">
+                      <IconButton
+                        size="small"
+                        color={showFilters ? 'primary' : 'default'}
+                        onClick={() => {
+                          if (showFilters) setColFilters({});
+                          setShowFilters((v) => !v);
+                        }}
+                        aria-label="Filter by column"
+                      >
+                        <FilterListIcon fontSize="small" />
+                      </IconButton>
+                    </Tooltip>
+                  </>
+                )}
                 {!!result.columns.length && (
-                  <Tooltip title="Copy the rows as CSV">
+                  <Tooltip
+                    title={
+                      filtering
+                        ? 'Copy the rows shown as CSV'
+                        : 'Copy the rows as CSV'
+                    }
+                  >
                     <IconButton
                       size="small"
                       onClick={() => {
                         navigator.clipboard.writeText(
-                          toCsv(result.columns, result.rows),
+                          toCsv(
+                            result.columns,
+                            visible.map((i) => result.rows[i]),
+                          ),
                         );
                         say('Copied as CSV');
                       }}
@@ -931,34 +1022,60 @@ export default function SqlClientTool() {
                           // eslint-disable-next-line react/no-array-index-key
                           <th key={i} style={{ minWidth: columnsWidth[i] }}>
                             {c}
+                            {showFilters && (
+                              <InputBase
+                                value={colFilters[i] || ''}
+                                onChange={(e) =>
+                                  setColFilters((f) => ({
+                                    ...f,
+                                    [i]: e.target.value,
+                                  }))
+                                }
+                                placeholder="filter"
+                                inputProps={{ 'aria-label': `Filter ${c}` }}
+                                sx={{
+                                  display: 'block',
+                                  fontSize: 11.5,
+                                  fontWeight: 400,
+                                  fontFamily: MONO_FONT,
+                                  mt: 0.25,
+                                  px: 0.5,
+                                  borderRadius: 0.5,
+                                  bgcolor: colFilters[i]?.trim()
+                                    ? 'action.selected'
+                                    : 'action.hover',
+                                }}
+                              />
+                            )}
                           </th>
                         ))}
                       </tr>
                     </thead>
                     <tbody>
-                      {result.rows.map((row, i) => (
-                        // eslint-disable-next-line react/no-array-index-key
-                        <tr key={i}>
-                          <Box component="td" sx={{ color: 'text.disabled' }}>
-                            {i + 1}
-                          </Box>
-                          {row.map((cell, j) => (
-                            // eslint-disable-next-line react/no-array-index-key
-                            <td key={j} title={cell}>
-                              {cell === '' || cell === 'NULL' ? (
-                                <Box
-                                  component="span"
-                                  sx={{ color: 'text.disabled' }}
-                                >
-                                  {cell === '' ? '' : 'NULL'}
-                                </Box>
-                              ) : (
-                                cell
-                              )}
-                            </td>
-                          ))}
-                        </tr>
-                      ))}
+                      {visible
+                        .map((i) => [i, result.rows[i]] as const)
+                        .map(([i, row]) => (
+                          <tr key={i}>
+                            <Box component="td" sx={{ color: 'text.disabled' }}>
+                              {i + 1}
+                            </Box>
+                            {row.map((cell, j) => (
+                              // eslint-disable-next-line react/no-array-index-key
+                              <td key={j} title={cell}>
+                                {cell === '' || cell === 'NULL' ? (
+                                  <Box
+                                    component="span"
+                                    sx={{ color: 'text.disabled' }}
+                                  >
+                                    {cell === '' ? '' : 'NULL'}
+                                  </Box>
+                                ) : (
+                                  cell
+                                )}
+                              </td>
+                            ))}
+                          </tr>
+                        ))}
                     </tbody>
                   </Box>
                 </Box>
@@ -1253,6 +1370,21 @@ export default function SqlClientTool() {
           say(`Added the text of "${note.title || 'Untitled'}"`);
         }}
       />
+      {target && timing && (
+        <SqlTimingDialog
+          open
+          onClose={() => setTiming(null)}
+          container={target.name}
+          db={saved.db}
+          sql={timing}
+          schema={schema}
+          note={
+            !isMongo && changesData(timing)
+              ? 'It changes data, so each run is rolled back.'
+              : undefined
+          }
+        />
+      )}
       <BottomToast
         text={toast?.text || null}
         error={toast?.error}
