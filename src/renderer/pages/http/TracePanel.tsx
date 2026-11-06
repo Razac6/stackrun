@@ -61,16 +61,10 @@ const colorOf = (service: string, all: string[]) =>
     : COLORS[Math.max(0, all.indexOf(service)) % COLORS.length];
 
 // ---------------- how to connect the services ----------------
-const NEST = `# NestJS (or any Node service) - no code changes
+const DOCKER = `# A Node service in Docker (not started in Commands): the agent goes into its image
 npm i @opentelemetry/api @opentelemetry/auto-instrumentations-node
 
-# started in Stackrun → Commands (its logs then show under its spans), macOS / Linux:
-OTEL_SERVICE_NAME=order OTEL_TRACES_EXPORTER=otlp OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 OTEL_METRICS_EXPORTER=none OTEL_LOGS_EXPORTER=none NODE_OPTIONS="--require @opentelemetry/auto-instrumentations-node/register" npm run start:dev
-
-# the same on Windows (PowerShell):
-$env:OTEL_SERVICE_NAME="order"; $env:OTEL_TRACES_EXPORTER="otlp"; $env:OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:4318"; $env:OTEL_METRICS_EXPORTER="none"; $env:OTEL_LOGS_EXPORTER="none"; $env:NODE_OPTIONS="--require @opentelemetry/auto-instrumentations-node/register"; npm run start:dev
-
-# in Docker - docker-compose.yml, the service's environment:
+# docker-compose.yml, the service's environment:
     environment:
       NODE_OPTIONS: --require @opentelemetry/auto-instrumentations-node/register
       OTEL_SERVICE_NAME: order          # its name on the diagram
@@ -80,11 +74,10 @@ $env:OTEL_SERVICE_NAME="order"; $env:OTEL_TRACES_EXPORTER="otlp"; $env:OTEL_EXPO
       OTEL_LOGS_EXPORTER: none
     extra_hosts:
       - host.docker.internal:host-gateway   # Linux / Colima
-
-
 `;
 
-const AZURE = `# Azure Functions (Node), run locally with func start
+const AZURE = `# Azure Functions (Node): "func start" in Commands with Trace ticked should be enough.
+# If its spans do not show up, the agent can go into the project instead:
 npm i @opentelemetry/api @opentelemetry/auto-instrumentations-node
 
 # local.settings.json → "Values":
@@ -157,7 +150,7 @@ function Snippet({ text }: { text: string }) {
 }
 
 export function TraceSetup({ defaultOpen = false }: { defaultOpen?: boolean }) {
-  const [tab, setTab] = useState('nest');
+  const [tab, setTab] = useState('commands');
   return (
     <Accordion
       defaultExpanded={defaultOpen}
@@ -172,20 +165,47 @@ export function TraceSetup({ defaultOpen = false }: { defaultOpen?: boolean }) {
       </AccordionSummary>
       <AccordionDetails>
         <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-          Each service sends its spans (OpenTelemetry) to the collector here, on
-          port 4318. The traceparent header Stackrun adds is picked up on its
-          own, and passed on to the services it calls.
+          Each service sends its spans (OpenTelemetry) to the collector here.
+          The traceparent header Stackrun adds is picked up on its own and
+          passed on to the services it calls.
         </Typography>
         <Tabs
           value={tab}
           onChange={(_, v) => setTab(v)}
           sx={{ minHeight: 32, mb: 1 }}
         >
-          <Tab value="nest" label="NestJS / Node" sx={{ minHeight: 32 }} />
+          <Tab
+            value="commands"
+            label="Started in Commands"
+            sx={{ minHeight: 32 }}
+          />
+          <Tab value="docker" label="In Docker" sx={{ minHeight: 32 }} />
           <Tab value="azure" label="Azure Functions" sx={{ minHeight: 32 }} />
           <Tab value="web" label="Angular / React" sx={{ minHeight: 32 }} />
         </Tabs>
-        {tab === 'nest' && <Snippet text={NEST} />}
+        {tab === 'commands' && (
+          <Box
+            component="ol"
+            sx={{ m: 0, pl: 2.5, fontSize: 13.5, '& li': { mb: 0.5 } }}
+          >
+            <li>
+              Commands → edit the step that starts the service (NestJS, Node,
+              Azure Functions) → tick <b>Trace</b>. Nothing to install in the
+              service.
+            </li>
+            <li>
+              Start it again. The first time Stackrun gets the OpenTelemetry
+              agent (npm, once) and starts the collector; its log says{' '}
+              <code>Traced as "order"</code> - the step&apos;s name is the name
+              on the diagram.
+            </li>
+            <li>
+              Here: Trace on for the request (the icon next to Send), send it,
+              open this tab. The logs of those steps show under their spans.
+            </li>
+          </Box>
+        )}
+        {tab === 'docker' && <Snippet text={DOCKER} />}
         {tab === 'azure' && <Snippet text={AZURE} />}
         {tab === 'web' && <Snippet text={WEB} />}
       </AccordionDetails>
@@ -633,7 +653,13 @@ function Timeline({ view, logs }: { view: TraceView; logs: StepLogs }) {
 }
 
 // ---------------- the panel ----------------
-export default function TracePanel({ traceId }: { traceId: string }) {
+export default function TracePanel({
+  traceId,
+  onResend,
+}: {
+  traceId: string;
+  onResend?: () => void; // send the request again (a new trace)
+}) {
   const [status, setStatus] = useState<TracingStatus | null>(null);
   const [starting, setStarting] = useState(false);
   const [view, setView] = useState<TraceView | null>(null);
@@ -712,6 +738,8 @@ export default function TracePanel({ traceId }: { traceId: string }) {
                 const s = await window.electron.tracing.start();
                 setStarting(false);
                 setStatus(s);
+                // this request went out before: its spans were not collected
+                if (s.running && onResend) onResend();
               }}
             >
               Start collector
@@ -719,7 +747,7 @@ export default function TracePanel({ traceId }: { traceId: string }) {
           }
         >
           {status.error ||
-            'The trace collector is not running. It is a small Jaeger in Docker (ports 4317, 4318, 16686); start it, then send the request again.'}
+            'The trace collector is not running (a small Jaeger in Docker, ports 4317, 4318, 16686). Start it - the request is sent again, now traced.'}
         </Alert>
         <TraceSetup defaultOpen />
       </Box>
@@ -778,11 +806,9 @@ export default function TracePanel({ traceId }: { traceId: string }) {
         </Tooltip>
       </Box>
       {error && <Alert severity="warning">{error}</Alert>}
-      {!view && !error && (
+      {!view && !error && waiting && (
         <Typography variant="body2" color="text.secondary" sx={{ p: 1 }}>
-          {waiting
-            ? 'Waiting for the spans of your services…'
-            : 'Nothing arrived for this trace.'}
+          Waiting for the spans of your services…
         </Typography>
       )}
       {view && (
@@ -794,14 +820,24 @@ export default function TracePanel({ traceId }: { traceId: string }) {
           {!waiting && <TraceLogs view={view} logs={logs} />}
         </>
       )}
-      {!waiting && (onlyStackrun || !view) && (
+      {!waiting && !error && (onlyStackrun || !view) && (
         <>
-          <Alert severity="info" sx={{ mt: 1 }}>
-            No spans from your services yet - are they sending them to
-            localhost:4318? (They come a few seconds after the request; refresh
-            then.)
+          <Alert
+            severity={view ? 'warning' : 'info'}
+            sx={{ mt: 1 }}
+            action={
+              onResend ? (
+                <Button color="inherit" size="small" onClick={onResend}>
+                  Send again
+                </Button>
+              ) : undefined
+            }
+          >
+            {view
+              ? 'Only Stackrun sent its part - your services did not send spans. Is Trace ticked on their steps in Commands, and were they started again after that?'
+              : 'Nothing arrived for this trace - it was probably sent before the collector was running. Send it again.'}
           </Alert>
-          <TraceSetup defaultOpen />
+          <TraceSetup defaultOpen={!!view} />
         </>
       )}
     </Box>

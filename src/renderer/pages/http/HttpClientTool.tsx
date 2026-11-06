@@ -987,6 +987,7 @@ export default function HttpClientTool({
   const [loaded, setLoaded] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const collectorCheckedAt = useRef(0); // the trace collector was running then
   // picked in search before the saved requests were loaded (this tool mounts on the click)
   const wanted = useRef<string | null>(openRequest?.id ?? null);
   const [settingsFor, setSettingsFor] = useState<string | null>(null); // collection settings
@@ -1210,8 +1211,14 @@ export default function HttpClientTool({
       !built.headers.some(([k]) => k.toLowerCase() === 'traceparent')
         ? newTraceContext()
         : null;
-    if (trace)
+    if (trace) {
       built.headers = [...built.headers, ['traceparent', trace.traceparent]];
+      // the collector has to be up before the request, or its spans go nowhere
+      if (Date.now() - collectorCheckedAt.current > 30000) {
+        const st = await window.electron.tracing.start();
+        if (st.running) collectorCheckedAt.current = Date.now();
+      }
+    }
     const startedAt = Date.now();
     const result = await window.electron.http.send({
       id: req.id,
@@ -1994,6 +2001,10 @@ export default function HttpClientTool({
   );
 
   // ---------------- right: request + response ----------------
+  // "Send again" from the Trace tab: the request on screen
+  const resendShown = () => {
+    if (request && !sending[request.id]) send(request, collection);
+  };
   const responsePanel = (req: HttpRequest) =>
     responseView(responses[req.id], !!sending[req.id]);
   const responseView = (res: Shown | undefined, waiting: boolean) => {
@@ -2084,7 +2095,9 @@ export default function HttpClientTool({
                 <Alert severity="error" sx={{ mt: 1 }}>
                   {result.error}
                 </Alert>
-                {res?.traceId && <TracePanel traceId={res.traceId} />}
+                {res?.traceId && (
+                  <TracePanel traceId={res.traceId} onResend={resendShown} />
+                )}
               </Box>
             ) : (
               <>
@@ -2147,7 +2160,7 @@ export default function HttpClientTool({
                       </Box>
                     ))}
                   {resTab === 'trace' && res?.traceId && (
-                    <TracePanel traceId={res.traceId} />
+                    <TracePanel traceId={res.traceId} onResend={resendShown} />
                   )}
                   {resTab === 'sent' && (
                     <CodeArea

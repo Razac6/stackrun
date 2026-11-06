@@ -432,6 +432,20 @@ function CommandDialog({
               }
             />
           </Tooltip>
+          <Tooltip title="A Node service (NestJS, Azure Functions…): Stackrun adds the OpenTelemetry agent and sends its spans to the local collector - nothing to install in the service. Send a request with Trace on in the HTTP Client to see it.">
+            <FormControlLabel
+              control={
+                <Checkbox
+                  size="small"
+                  checked={!!draft.trace}
+                  onChange={(e) =>
+                    setDraft((d) => ({ ...d, trace: e.target.checked }))
+                  }
+                />
+              }
+              label={<Typography variant="body2">Trace</Typography>}
+            />
+          </Tooltip>
         </Box>
         <Box sx={{ display: 'flex', gap: 1, alignItems: 'flex-start' }}>
           <Select
@@ -824,6 +838,7 @@ export default function CommandsTool({
         ready: c.ready || null,
         timeout: c.timeout || null,
         when: c.when || null,
+        trace: !!c.trace,
         section: c.section,
         nest: c.nest,
       })),
@@ -871,6 +886,7 @@ export default function CommandsTool({
             ready: c.ready || null,
             timeout: c.timeout || null,
             when: c.when || null,
+            trace: !!c.trace,
           };
         }
       }),
@@ -908,6 +924,7 @@ export default function CommandsTool({
             ready: c.ready || null,
             timeout: c.timeout || null,
             when: c.when || null,
+            trace: !!c.trace,
           }
         : null,
     );

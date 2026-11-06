@@ -34,6 +34,13 @@ import {
   missingPaths,
 } from './conditionCheck';
 import { resolveShellEnv } from './shellEnv';
+import {
+  agentInstalled,
+  installAgent,
+  serviceNameOf,
+  tracedEnv,
+} from './otelAgent';
+import { startTracing } from './tracing';
 
 export interface RunStepInput {
   id: string;
@@ -48,6 +55,7 @@ export interface RunStepInput {
   // where it sits, per package level: its entry and whether that package is async
   // (missing = one plain list, run in order)
   nest?: { parallel: boolean; index: number }[];
+  trace?: boolean; // a Node service: traced with OpenTelemetry (HTTP Client → Trace)
 }
 
 export type StepStatus =
@@ -600,8 +608,22 @@ const runStep = async (
   }
   if (!isDir) return fail(`Working directory not found: ${cwd}`);
 
-  const env = await stepEnv();
+  let env: NodeJS.ProcessEnv = await stepEnv();
   if (stopped()) return end('stopped');
+  // "Trace": the OpenTelemetry agent from Stackrun's folder, nothing in the service
+  if (input.trace) {
+    if (!agentInstalled())
+      say('◷ Installing the OpenTelemetry agent for tracing (only once)…\n');
+    const agent = await installAgent(env);
+    if (agent.ok) {
+      env = tracedEnv(env, input.name);
+      startTracing().catch(() => {}); // the collector, if it is not up yet
+      say(
+        `◎ Traced as "${env.OTEL_SERVICE_NAME || serviceNameOf(input.name)}"\n`,
+      );
+    } else say(`⚠ Not traced - ${agent.error}\n`);
+    if (stopped()) return end('stopped');
+  }
 
   // --- only run if… ---
   if (input.when) {
@@ -959,6 +981,7 @@ export const retryStep = (
       ready: normalizeReady(latest.ready ?? null),
       timeout: Math.max(0, Number(latest.timeout) || 0),
       when: normalizeCondition(latest.when ?? null),
+      trace: latest.trace ?? input.trace,
     };
     step.name = saved.inputs[index].name;
     step.command = saved.inputs[index].command;

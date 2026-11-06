@@ -21,6 +21,7 @@ import { registerHttpIpc } from './httpClient';
 import { flushHistory, registerHttpHistoryIpc } from './httpHistory';
 import { registerOAuthIpc } from './oauth';
 import { registerTracingIpc } from './tracing';
+import { setAgentDir } from './otelAgent';
 import { registerSqlIpc, setSnapshotDir } from './sqlRunner';
 import { registerDockerfileIpc } from './dockerfileRunner';
 import { registerComposeIpc } from './composeRunner';
@@ -277,6 +278,7 @@ registerDockerfileIpc(ipcMain);
 registerComposeIpc(ipcMain);
 registerPortIpc(ipcMain);
 setSnapshotDir(path.join(app.getPath('userData'), 'sql-snapshots'));
+setAgentDir(path.join(app.getPath('userData'), 'otel-node-agent'));
 registerDockerIpc(ipcMain);
 registerCommandIpc(ipcMain, {
   containerReady,

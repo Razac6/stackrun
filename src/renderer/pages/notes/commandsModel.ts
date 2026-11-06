@@ -17,6 +17,7 @@ export interface CliCommand {
   timeout?: number | null; // s it may take (waited-for steps), killed after; 0 = no limit
   when?: RunCondition | null; // run it only if… (deps changed, .env missing...)
   packageId?: string; // set = this entry is another package, run in its place
+  trace?: boolean; // a Node service traced with OpenTelemetry (agent from Stackrun)
 }
 
 export interface CommandGroup {
@@ -161,6 +162,7 @@ export const parseState = (json: string | null | undefined): CommandsState => {
                 ready: parseReady(c.ready),
                 timeout: Math.max(0, Number(c.timeout) || 0) || null,
                 when: normalizeCondition(c.when),
+                ...(c.trace === true && { trace: true }),
                 ...(typeof c.packageId === 'string' && {
                   packageId: c.packageId,
                 }),
