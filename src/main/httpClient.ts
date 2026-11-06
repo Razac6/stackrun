@@ -79,6 +79,7 @@ const once = (
   req: HttpSend,
   target: URL,
   started: number,
+  family?: 4 | 6, // which address of "localhost" to use
 ): Promise<{
   status: number;
   statusText: string;
@@ -107,6 +108,7 @@ const once = (
         method: req.method,
         headers,
         rejectUnauthorized: !req.insecure,
+        ...(family && { family }),
       },
       (res) => {
         const chunks: Buffer[] = [];
@@ -157,6 +159,32 @@ const once = (
     r.end();
   });
 
+/**
+ * "localhost" is ::1 and 127.0.0.1: a dev server often listens on only one of them
+ * (macOS gives ::1 first). Refused on one, the other is tried.
+ */
+const onceAnyLocalhost = async (
+  req: HttpSend,
+  target: URL,
+  started: number,
+) => {
+  try {
+    return await once(req, target, started);
+  } catch (e: any) {
+    if (e?.code !== 'ECONNREFUSED' || target.hostname !== 'localhost') throw e;
+    const triedV6 = String(e.address || '').includes(':');
+    try {
+      return await once(req, target, started, triedV6 ? 4 : 6);
+    } catch (again: any) {
+      if (again?.code === 'ECONNREFUSED') {
+        // neither answered: say it about "localhost", not one of its addresses
+        again.address = 'localhost';
+      }
+      throw again;
+    }
+  }
+};
+
 export const sendHttp = async (req: HttpSend): Promise<HttpResult> => {
   const started = Date.now();
   const redirects: string[] = [];
@@ -187,7 +215,7 @@ export const sendHttp = async (req: HttpSend): Promise<HttpResult> => {
   try {
     for (;;) {
       // eslint-disable-next-line no-await-in-loop
-      const res = await once(current, target, started);
+      const res = await onceAnyLocalhost(current, target, started);
       if (
         current.followRedirects !== false &&
         res.location &&

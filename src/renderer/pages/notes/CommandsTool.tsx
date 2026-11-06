@@ -55,6 +55,7 @@ import TimerOutlinedIcon from '@mui/icons-material/TimerOutlined';
 import { MONO_FONT } from './highlight';
 import BottomToast from './BottomToast';
 import { portFromError } from '../../../main/portTools';
+import PortKillPrompt from '../../components/PortKillPrompt';
 import { PackageIconView, packageIconLabel } from './packageIcons';
 import useCopy from './useCopy';
 import {
@@ -660,6 +661,7 @@ function LogView({ text, filter }: { text: string; filter: string }) {
         lineHeight: 1.55,
         whiteSpace: 'pre-wrap',
         wordBreak: 'break-word',
+        overflowWrap: 'anywhere',
         bgcolor: alpha(theme.palette.text.primary, 0.04),
         borderRadius: 2,
       }}
@@ -696,6 +698,17 @@ function LogView({ text, filter }: { text: string; filter: string }) {
 }
 
 // --- main ---------------------------------------------------------------------
+// "Port in use" is asked once per failure, for failures since the window opened (the
+// Commands page may not be open when it happens - then it is asked when it opens)
+const portAsked = new Set<string>();
+const windowOpenedAt = Date.now();
+interface PortAsk {
+  runId: string;
+  index: number;
+  port: number;
+  stepName: string;
+}
+
 export default function CommandsTool({
   openRun = null,
   openPackage = null,
@@ -907,13 +920,17 @@ export default function CommandsTool({
    * status and its running servers, then the steps skipped because of it run too.
    */
   const retry = async (index: number) => {
-    if (!selected || !state) return;
-    const id = selected.steps[index]?.id;
+    if (selected) await retryIn(selected.id, index);
+  };
+  async function retryIn(runId: string, index: number) {
+    const inRun = runs.find((r) => r.id === runId);
+    if (!inRun || !state) return;
+    const id = inRun.steps[index]?.id;
     const c = state.groups
       .flatMap((g) => g.commands)
       .find((x) => x.id === id && !x.packageId);
     const run = await window.electron.commands.retry(
-      selected.id,
+      runId,
       index,
       c
         ? {
@@ -930,9 +947,53 @@ export default function CommandsTool({
     );
     if (run) {
       setRuns((list) => list.map((r) => (r.id === run.id ? run : r)));
-      setSelectedStep(index);
+      if (runId === selectedRun) setSelectedStep(index);
     }
-  };
+  }
+
+  // ---------------- a step failed on a taken port: ask to kill what holds it ----------------
+  const [portAsk, setPortAsk] = useState<PortAsk | null>(null);
+  // freed: run it again as soon as its run lets a step be retried (the sequence ended)
+  const [retryWhenSettled, setRetryWhenSettled] = useState<{
+    runId: string;
+    index: number;
+  } | null>(null);
+  useEffect(() => {
+    if (portAsk) return;
+    // eslint-disable-next-line no-restricted-syntax
+    for (const run of runs) {
+      const index = run.steps.findIndex(
+        (st) =>
+          st.status === 'failed' &&
+          (st.endedAt || 0) >= windowOpenedAt &&
+          !portAsked.has(`${run.id}:${st.id}:${st.endedAt}`) &&
+          (st.port || portFromError(st.tail)),
+      );
+      if (index >= 0) {
+        const st = run.steps[index];
+        portAsked.add(`${run.id}:${st.id}:${st.endedAt}`);
+        setPortAsk({
+          runId: run.id,
+          index,
+          port: (st.port || portFromError(st.tail))!,
+          stepName: st.name,
+        });
+        return;
+      }
+    }
+  }, [runs, portAsk]);
+  useEffect(() => {
+    if (!retryWhenSettled) return;
+    const run = runs.find((r) => r.id === retryWhenSettled.runId);
+    if (!run) {
+      setRetryWhenSettled(null);
+      return;
+    }
+    if (!run.settled) return;
+    setRetryWhenSettled(null);
+    retryIn(retryWhenSettled.runId, retryWhenSettled.index);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [runs, retryWhenSettled]);
 
   // ---------------- export / import of packages ----------------
   const exportToFile = async (
@@ -2203,6 +2264,7 @@ export default function CommandsTool({
           display: 'flex',
           flexDirection: 'column',
           minHeight: 0,
+          minWidth: 0, // a long line in a log must not widen the panel
           gap: 1,
         }}
       >
@@ -2587,7 +2649,10 @@ export default function CommandsTool({
                         fontFamily: MONO_FONT,
                         fontSize: 11,
                         whiteSpace: 'pre-wrap',
-                        wordBreak: 'break-word',
+                        // long paths in a stack trace wrap too (break-word alone
+                        // still sizes the box to the longest one)
+                        overflowWrap: 'anywhere',
+                        minWidth: 0,
                         color: 'error.main',
                         bgcolor: alpha(theme.palette.error.main, 0.07),
                         borderRadius: 1.5,
@@ -2608,7 +2673,7 @@ export default function CommandsTool({
                           Hint: {step.note}
                         </Box>
                       )}
-                      {portFromError(step.tail) && (
+                      {(step.port || portFromError(step.tail)) && (
                         <Button
                           size="small"
                           color="error"
@@ -2618,14 +2683,14 @@ export default function CommandsTool({
                             // App opens the "Port in use" window
                             window.dispatchEvent(
                               new CustomEvent('stackrun:free-port', {
-                                detail: portFromError(step.tail),
+                                detail: step.port || portFromError(step.tail),
                               }),
                             );
                           }}
                           sx={{ mt: 0.75, display: 'flex' }}
                         >
-                          Port {portFromError(step.tail)} is taken - see who /
-                          free it
+                          Port {step.port || portFromError(step.tail)} is taken
+                          - see who / free it
                         </Button>
                       )}
                     </Box>
@@ -2916,6 +2981,17 @@ export default function CommandsTool({
       </Menu>
 
       <BottomToast text={hint} onClose={() => setHint(null)} />
+      {portAsk && (
+        <PortKillPrompt
+          port={portAsk.port}
+          stepName={portAsk.stepName}
+          onNo={() => setPortAsk(null)}
+          onYes={() => {
+            setRetryWhenSettled({ runId: portAsk.runId, index: portAsk.index });
+            setPortAsk(null);
+          }}
+        />
+      )}
       <CommandDialog
         open={!!editing}
         initial={editing?.command || null}

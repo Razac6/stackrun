@@ -140,4 +140,35 @@ describe('sendHttp', () => {
     setTimeout(() => cancelHttp('i'), 100);
     expect((await p).error).toBe('Cancelled');
   });
+  it('reaches a localhost server that listens on only one of ::1 / 127.0.0.1', async () => {
+    // eslint-disable-next-line global-require
+    const dns = require('dns');
+    // like macOS (and Electron's Node): localhost is ::1 first, nothing listens there
+    const lookup = dns.lookup;
+    dns.lookup = (host: string, opts: any, cb: any) => {
+      const o = typeof opts === 'function' ? {} : opts;
+      const done = typeof opts === 'function' ? opts : cb;
+      if (host === 'localhost' && !o.family)
+        return o.all
+          ? done(null, [{ address: '::1', family: 6 }])
+          : done(null, '::1', 6);
+      return lookup(host, opts, cb);
+    };
+    const only4 = http.createServer((q, r) => r.end('v4'));
+    await new Promise<void>((ok) => only4.listen(0, '127.0.0.1', () => ok()));
+    const { port } = only4.address() as AddressInfo;
+    try {
+      const r = await sendHttp({
+        id: 'lh',
+        method: 'GET',
+        url: `http://localhost:${port}/`,
+        headers: [],
+      });
+      expect(r.error).toBeNull();
+      expect(r.body).toBe('v4');
+    } finally {
+      dns.lookup = lookup;
+      only4.close();
+    }
+  });
 });

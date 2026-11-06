@@ -17,6 +17,7 @@ import {
   Button,
   Chip,
   CircularProgress,
+  Dialog,
   IconButton,
   Tab,
   Tabs,
@@ -29,6 +30,8 @@ import RefreshIcon from '@mui/icons-material/Refresh';
 import OpenInNewIcon from '@mui/icons-material/OpenInNew';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
+import FullscreenIcon from '@mui/icons-material/Fullscreen';
+import FullscreenExitIcon from '@mui/icons-material/FullscreenExit';
 import type { TracingStatus } from '../../../main/tracing';
 import {
   logLevel,
@@ -666,6 +669,7 @@ export default function TracePanel({
   const [error, setError] = useState<string | null>(null);
   const [waiting, setWaiting] = useState(false);
   const [logs, setLogs] = useState<StepLogs>([]);
+  const [full, setFull] = useState(false); // the trace over the whole window
   const timer = useRef<ReturnType<typeof setTimeout>>();
 
   // spans arrive in batches (a few seconds after the request): ask until it settles
@@ -722,7 +726,7 @@ export default function TracePanel({
 
   if (!status.running)
     return (
-      <Box sx={{ p: 1 }}>
+      <Box sx={{ p: 1, width: 0, minWidth: '100%' }}>
         <Alert
           severity="info"
           action={
@@ -755,8 +759,10 @@ export default function TracePanel({
 
   const onlyStackrun =
     view && view.spans.every((s) => s.service === STACKRUN_SERVICE);
-  return (
-    <Box sx={{ p: 0.5 }}>
+  const panel = (
+    // width 0 + minWidth 100%: as wide as the response pane, never wider - the
+    // diagram and long log lines scroll inside instead of widening the whole page
+    <Box sx={{ p: full ? 2 : 0.5, width: 0, minWidth: '100%' }}>
       <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
         {view && (
           <>
@@ -804,6 +810,19 @@ export default function TracePanel({
             <OpenInNewIcon fontSize="small" />
           </IconButton>
         </Tooltip>
+        <Tooltip title={full ? 'Exit full screen (Esc)' : 'Full screen'}>
+          <IconButton
+            size="small"
+            onClick={() => setFull(!full)}
+            aria-label={full ? 'Exit full screen' : 'Full screen'}
+          >
+            {full ? (
+              <FullscreenExitIcon fontSize="small" />
+            ) : (
+              <FullscreenIcon fontSize="small" />
+            )}
+          </IconButton>
+        </Tooltip>
       </Box>
       {error && <Alert severity="warning">{error}</Alert>}
       {!view && !error && waiting && (
@@ -841,5 +860,24 @@ export default function TracePanel({
         </>
       )}
     </Box>
+  );
+  return (
+    <>
+      {full ? (
+        <Box sx={{ p: 1, display: 'flex', alignItems: 'center', gap: 1 }}>
+          <Typography variant="body2" color="text.secondary">
+            The trace is open full screen.
+          </Typography>
+          <Button size="small" onClick={() => setFull(false)}>
+            Back here
+          </Button>
+        </Box>
+      ) : (
+        panel
+      )}
+      <Dialog fullScreen open={full} onClose={() => setFull(false)}>
+        {full && panel}
+      </Dialog>
+    </>
   );
 }

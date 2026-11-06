@@ -41,6 +41,7 @@ import {
   tracedEnv,
 } from './otelAgent';
 import { startTracing } from './tracing';
+import { portFromError } from './portTools';
 
 export interface RunStepInput {
   id: string;
@@ -84,6 +85,8 @@ export interface RunStep {
   readyState: 'waiting' | 'ready' | 'failed' | null;
   readyDetail: string | null; // the latest probe result
   readyAt: number | null; // when it was up (its clock stops there)
+  // it failed because this port was taken (found in its whole output, not only the tail)
+  port: number | null;
 }
 
 export interface CommandRun {
@@ -703,6 +706,7 @@ const runStep = async (
     exitInfo = info;
     step.code = info.code;
     step.tail = lastLines(output);
+    step.port = info.code === 0 ? null : portFromError(output);
     if (info.gaveUp) {
       step.note = `it didn't exit after being stopped (pid ${proc.child.pid}) - kill it by hand if it still runs`;
       say(`⚠ ${step.note}\n`);
@@ -1005,6 +1009,7 @@ export const retryStep = (
       readyState: null,
       readyDetail: null,
       readyAt: null,
+      port: null,
     });
     stepStops.delete(`${run.id}:${i}`);
     const outs = stepOutputs.get(run.id);
@@ -1082,6 +1087,7 @@ export const startRun = (
       readyState: null,
       readyDetail: null,
       readyAt: null,
+      port: null,
     })),
   };
   runs.set(run.id, run);
