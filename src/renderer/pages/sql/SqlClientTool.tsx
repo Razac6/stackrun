@@ -395,11 +395,12 @@ export default function SqlClientTool() {
           minHeight: 0,
         }}
       >
-        <Box sx={{ display: 'flex', gap: 0.5 }}>
+        <Box sx={{ display: 'flex', gap: 0.5, alignItems: 'center' }}>
           <Select
             size="small"
             fullWidth
             displayEmpty
+            sx={{ minWidth: 0 }}
             value={target ? target.name : ''}
             onChange={(e) =>
               update({ container: String(e.target.value), db: '' })
@@ -429,6 +430,7 @@ export default function SqlClientTool() {
               size="small"
               onClick={loadTargets}
               aria-label="Refresh containers"
+              sx={{ flexShrink: 0 }}
             >
               <RefreshIcon fontSize="small" />
             </IconButton>

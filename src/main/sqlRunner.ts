@@ -18,7 +18,10 @@ import {
   listDatabasesSql,
   listSchemasSql,
   loginHint,
-  socketProblem,
+  listSocketsScript,
+  portHints,
+  reachProblem,
+  socketsFrom,
   SqlConn,
   defaultDatabase,
   listTablesSql,
@@ -95,8 +98,9 @@ export const setLogin = (container: string, user: string, password: string) => {
   if (user.trim()) logins.set(container, { user: user.trim(), password });
   else logins.delete(container);
 };
-// containers whose client socket is elsewhere: connect over TCP from then on
-const useTcp = new Set<string>();
+// where a container's server was found when the default socket did not answer
+// (another socket folder or port, or TCP) - by container name, tried first next time
+const places = new Map<string, Pick<SqlConn, 'host' | 'port' | 'tcp'>>();
 
 /**
  * The container env, with POSTGRES_PASSWORD_FILE & co. read from inside the container
@@ -124,8 +128,53 @@ const containerEnv = async (containerId: string) => {
 const connFor = (name: string, schema?: string): SqlConn => ({
   ...(logins.get(name) || {}),
   schema,
-  tcp: useTcp.has(name),
+  ...(places.get(name) || {}),
 });
+
+const describePlace = (p: Pick<SqlConn, 'host' | 'port' | 'tcp'>) =>
+  `${p.host || (p.tcp ? '127.0.0.1' : 'socket')}${p.port ? `:${p.port}` : ''}`;
+
+/**
+ * Other places the server may listen on inside the container: its socket files (another
+ * folder / port, e.g. `-p 5433` or Bitnami's /opt/bitnami/postgresql/tmp), ports from its
+ * env and command, then plain TCP.
+ */
+const candidatePlaces = async (
+  containerId: string,
+  kind: string,
+  env: Record<string, string>,
+) => {
+  const out: Pick<SqlConn, 'host' | 'port' | 'tcp'>[] = [];
+  const add = (p: Pick<SqlConn, 'host' | 'port' | 'tcp'>) => {
+    if (!out.some((x) => describePlace(x) === describePlace(p))) out.push(p);
+  };
+  if (kind === 'postgres') {
+    const ls = await exec(
+      `where-${containerId}`,
+      ['exec', containerId, 'sh', '-c', listSocketsScript()],
+      '',
+      8000,
+    );
+    socketsFrom(ls.stdout).forEach((x) => add(x));
+  }
+  const cmd = await exec(
+    `cmd-${containerId}`,
+    ['inspect', '--format', '{{json .Config.Cmd}}', containerId],
+    '',
+    8000,
+  );
+  let args: string[] = [];
+  try {
+    args = (JSON.parse(cmd.stdout || '[]') || []).map(String);
+  } catch (e) {
+    args = [];
+  }
+  portHints(kind as any, env, args).forEach((port) =>
+    add({ host: '127.0.0.1', port }),
+  );
+  add({ tcp: true });
+  return out;
+};
 
 export const runSql = async (
   runId: string,
@@ -177,18 +226,39 @@ export const runSql = async (
   const conn = connFor(container.name, schema);
   let res = await attempt(conn);
   if (!res) return fail('Not supported');
-  // the client looked for a socket that is not there: over TCP then (and from now on)
-  if (res.code !== 0 && !conn.tcp && socketProblem(res.stderr)) {
-    const viaTcp = await attempt({ ...conn, tcp: true });
-    if (viaTcp && (viaTcp.code === 0 || !socketProblem(viaTcp.stderr))) {
-      res = viaTcp;
-      useTcp.add(container.name);
+  // the server did not answer where the client looked: find where it listens (another
+  // socket folder or port, TCP) and remember it. The first error is the one shown when
+  // nothing answers - it says the most.
+  let tried: string[] = [];
+  if (res.code !== 0 && reachProblem(res.stderr)) {
+    const first = res;
+    places.delete(container.name);
+    const base = connFor(container.name, schema);
+    const candidates = await candidatePlaces(containerId, container.db, env);
+    tried = candidates.map(describePlace);
+    let found = false;
+    // eslint-disable-next-line no-restricted-syntax
+    for (const place of candidates) {
+      // eslint-disable-next-line no-await-in-loop
+      const r = await attempt({ ...base, ...place });
+      if (r && (r.code === 0 || !reachProblem(r.stderr))) {
+        res = r;
+        places.set(container.name, place);
+        found = true;
+        break;
+      }
     }
+    if (!found) res = first;
   }
   const timeMs = Date.now() - started;
   if (res.code !== 0) {
     const why = clean(res.stderr) || `Failed (exit ${res.code})`;
-    return fail(`${why}${loginHint(res.stderr)}`, timeMs);
+    const where =
+      tried.length && reachProblem(res.stderr)
+        ? `
+The server did not answer on its socket or on ${tried.join(', ')} inside the container - is it still starting, or does it listen somewhere else (listen_addresses, port)?`
+        : '';
+    return fail(`${why}${loginHint(res.stderr)}${where}`, timeMs);
   }
   const result = toResult(container.db, res.stdout, MAX_ROWS, timeMs);
   if (dryRun)

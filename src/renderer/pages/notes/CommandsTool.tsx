@@ -886,6 +886,37 @@ export default function CommandsTool({
     }
   };
 
+  /**
+   * Retries a failed step inside its run: the package (and the one around it) keeps its
+   * status and its running servers, then the steps skipped because of it run too.
+   */
+  const retry = async (index: number) => {
+    if (!selected || !state) return;
+    const id = selected.steps[index]?.id;
+    const c = state.groups
+      .flatMap((g) => g.commands)
+      .find((x) => x.id === id && !x.packageId);
+    const run = await window.electron.commands.retry(
+      selected.id,
+      index,
+      c
+        ? {
+            name: commandLabel(c),
+            command: c.command,
+            cwd: c.cwd,
+            wait: c.wait,
+            ready: c.ready || null,
+            timeout: c.timeout || null,
+            when: c.when || null,
+          }
+        : null,
+    );
+    if (run) {
+      setRuns((list) => list.map((r) => (r.id === run.id ? run : r)));
+      setSelectedStep(index);
+    }
+  };
+
   // ---------------- export / import of packages ----------------
   const exportToFile = async (
     groupIds?: string[],
@@ -1204,6 +1235,13 @@ export default function CommandsTool({
       ? PACKAGE_COLOR_HEX[inner.color]
       : theme.palette.text.secondary;
     const innerRun = runningGroups.get(inner.id);
+    // its steps running inside the package around it (not a run of its own)
+    const liveInside = innerRun
+      ? []
+      : steps
+          .map((st) => liveSteps.get(st.id))
+          .filter((x): x is { runId: string; index: number } => !!x);
+    const innerLive = !!innerRun || liveInside.length > 0;
     const isDropBefore =
       drop?.type === 'command' &&
       drop.groupId === group.id &&
@@ -1289,7 +1327,7 @@ export default function CommandsTool({
             className="row-actions"
             sx={{
               display: 'flex',
-              opacity: innerRun ? 1 : 0.5,
+              opacity: innerLive ? 1 : 0.5,
               transition: 'opacity .15s',
             }}
           >
@@ -1311,12 +1349,24 @@ export default function CommandsTool({
                 <LinkOffIcon sx={{ fontSize: 17 }} />
               </IconButton>
             </Tooltip>
-            {innerRun ? (
-              <Tooltip title={`Stop ${inner.name}`}>
+            {innerLive ? (
+              <Tooltip
+                title={
+                  innerRun
+                    ? `Stop ${inner.name}`
+                    : `Stop ${inner.name} (the rest of ${group.name} goes on)`
+                }
+              >
                 <IconButton
                   size="small"
                   color="error"
-                  onClick={() => window.electron.commands.stop(innerRun.id)}
+                  onClick={() => {
+                    if (innerRun) window.electron.commands.stop(innerRun.id);
+                    else
+                      liveInside.forEach((x) =>
+                        window.electron.commands.stopStep(x.runId, x.index),
+                      );
+                  }}
                   aria-label={`Stop ${inner.name}`}
                 >
                   <StopIcon sx={{ fontSize: 19 }} />
@@ -1911,9 +1961,6 @@ export default function CommandsTool({
   const failedIndex = selected
     ? selected.steps.findIndex((s) => s.status === 'failed')
     : -1;
-  // the innermost nested package of the failed step
-  const failedSection =
-    selected && failedIndex >= 0 ? selected.steps[failedIndex].section : null;
 
   // nested packages that start at step i (one header per level)
   const newSections = (i: number) => {
@@ -1929,13 +1976,11 @@ export default function CommandsTool({
     if (!selected) return null;
     const steps = selected.steps.filter((st) => stepInSection(st, section));
     const status = sectionShown(steps);
-    const firstIndex = selected.steps.findIndex((st) =>
-      stepInSection(st, section),
-    );
     const failedAt = selected.steps.findIndex(
       (st) => st.status === 'failed' && stepInSection(st, section),
     );
     const done = selected.status !== 'running';
+    const canRetry = selected.settled && failedAt >= 0;
     const name = section.split(SECTION_SEP).pop();
     return (
       <Box
@@ -1980,7 +2025,7 @@ export default function CommandsTool({
           </Box>
         </Typography>
         <StatusIcon status={status} size={14} />
-        {done && (
+        {(done || canRetry) && (
           <Box
             className="section-actions"
             sx={{
@@ -1989,29 +2034,35 @@ export default function CommandsTool({
               transition: 'opacity .15s',
             }}
           >
-            {failedAt > firstIndex && (
-              <Tooltip title={`Rerun ${name} from its failed step`}>
+            {canRetry && (
+              <Tooltip
+                title={`Retry “${selected.steps[failedAt].name}” here - ${name} stays part of this run`}
+              >
                 <IconButton
                   size="small"
                   color="error"
-                  onClick={() => rerun({ section, from: failedAt })}
-                  aria-label={`Rerun ${name} from the failed step`}
+                  onClick={() => retry(failedAt)}
+                  aria-label={`Retry ${name} from the failed step`}
                   sx={{ p: 0.25 }}
                 >
                   <ReplayIcon sx={{ fontSize: 15 }} />
                 </IconButton>
               </Tooltip>
             )}
-            <Tooltip title={`Run only ${name} again (${steps.length} steps)`}>
-              <IconButton
-                size="small"
-                onClick={() => rerun({ section })}
-                aria-label={`Rerun only ${name}`}
-                sx={{ p: 0.25 }}
+            {done && (
+              <Tooltip
+                title={`Run only ${name} again, as a run of its own (${steps.length} steps)`}
               >
-                <PlayArrowIcon sx={{ fontSize: 16 }} />
-              </IconButton>
-            </Tooltip>
+                <IconButton
+                  size="small"
+                  onClick={() => rerun({ section })}
+                  aria-label={`Rerun only ${name}`}
+                  sx={{ p: 0.25 }}
+                >
+                  <PlayArrowIcon sx={{ fontSize: 16 }} />
+                </IconButton>
+              </Tooltip>
+            )}
           </Box>
         )}
       </Box>
@@ -2203,6 +2254,21 @@ export default function CommandsTool({
               </MenuItem>
             ))}
           </Select>
+          {selected?.settled && failedIndex >= 0 && (
+            <Tooltip
+              title={`Run “${selected.steps[failedIndex].name}” again in this run (then what was skipped after it) - the package keeps its status`}
+            >
+              <Button
+                size="small"
+                color="error"
+                variant="contained"
+                startIcon={<ReplayIcon />}
+                onClick={() => retry(failedIndex)}
+              >
+                Retry
+              </Button>
+            </Tooltip>
+          )}
           {selected?.status === 'running' ? (
             <Button
               size="small"
@@ -2225,22 +2291,6 @@ export default function CommandsTool({
           ) : (
             selected && (
               <>
-                {failedSection && (
-                  <Tooltip
-                    title={`Run only “${failedSection.split(SECTION_SEP).pop()}” again, from its failed step - not the whole package`}
-                  >
-                    <Button
-                      size="small"
-                      color="error"
-                      startIcon={<ReplayIcon />}
-                      onClick={() =>
-                        rerun({ section: failedSection, from: failedIndex })
-                      }
-                    >
-                      Rerun failed part
-                    </Button>
-                  </Tooltip>
-                )}
                 {failedIndex > 0 && (
                   <Tooltip
                     title={`Skip the steps that passed and start at “${selected.steps[failedIndex].name}”`}
@@ -2447,6 +2497,23 @@ export default function CommandsTool({
                         </IconButton>
                       </Tooltip>
                     )}
+                  {selected.settled &&
+                    ['failed', 'stopped', 'skipped'].includes(step.status) && (
+                      <Tooltip title="Retry this step here (then what was skipped after it)">
+                        <IconButton
+                          size="small"
+                          color={step.status === 'failed' ? 'error' : 'default'}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            retry(i);
+                          }}
+                          aria-label={`Retry ${step.name}`}
+                          sx={{ p: 0.25 }}
+                        >
+                          <ReplayIcon sx={{ fontSize: 16 }} />
+                        </IconButton>
+                      </Tooltip>
+                    )}
                   {selected.status !== 'running' && (
                     <Box
                       className="step-actions"
@@ -2455,7 +2522,7 @@ export default function CommandsTool({
                         opacity: step.status === 'failed' ? 1 : 0,
                       }}
                     >
-                      <Tooltip title="Run only this step">
+                      <Tooltip title="Run only this step, as a run of its own">
                         <IconButton
                           size="small"
                           onClick={(e) => {
@@ -2469,7 +2536,7 @@ export default function CommandsTool({
                         </IconButton>
                       </Tooltip>
                       {i > 0 && selected.steps.length > 1 && (
-                        <Tooltip title="Rerun from this step">
+                        <Tooltip title="Rerun from this step, as a new run">
                           <IconButton
                             size="small"
                             onClick={(e) => {

@@ -88,6 +88,9 @@ export interface CommandRun {
   endedAt: number | null;
   // everything started and the background steps are ready (they keep running)
   readyAt: number | null;
+  // its sequence got to the end (only background steps may still run): a failed step
+  // can be retried in place now
+  settled: boolean;
   steps: RunStep[];
   output: string;
 }
@@ -802,7 +805,11 @@ export const entriesAt = <T extends Slot>(slots: T[], depth: number) => {
   return out;
 };
 
-const drive = async (run: CommandRun, stopOnError: boolean) => {
+const drive = async (
+  run: CommandRun,
+  stopOnError: boolean,
+  only?: Set<number>, // a retry: just these steps
+) => {
   const { inputs } = pending.get(run.id)!;
   let failed = false;
   const halted = () => stopRequested.has(run.id) || (failed && stopOnError);
@@ -842,10 +849,12 @@ const drive = async (run: CommandRun, stopOnError: boolean) => {
     }
   };
   await runLevel(
-    inputs.map((input, index) => ({
-      index,
-      nest: input.nest?.length ? input.nest : [{ parallel: false, index }],
-    })),
+    inputs
+      .map((input, index) => ({
+        index,
+        nest: input.nest?.length ? input.nest : [{ parallel: false, index }],
+      }))
+      .filter((slot) => !only || only.has(slot.index)),
     0,
   );
   const why = stopRequested.has(run.id) ? 'stopped' : 'an earlier step failed';
@@ -856,8 +865,78 @@ const drive = async (run: CommandRun, stopOnError: boolean) => {
     }
   });
   chainDone.add(run.id);
+  run.settled = true;
   publish(run);
   finishRun(run);
+};
+
+/**
+ * Retries a failed (or stopped / skipped) step inside its own run - the package it
+ * belongs to keeps its status and its servers - then the steps skipped because of it.
+ * `latest` is the command as saved now, so a fix made after the failure is what runs.
+ */
+export const retryStep = (
+  runId: string,
+  index: number,
+  latest?: Partial<RunStepInput> | null,
+) => {
+  const run = runs.get(runId);
+  const saved = pending.get(runId);
+  const step = run?.steps[index];
+  if (!run || !saved || !step || !saved.inputs[index]) return null;
+  // while the sequence still goes, the step may still be about to run
+  if (!run.settled) return null;
+  if (!['failed', 'stopped', 'skipped'].includes(step.status)) return null;
+  if (latest && String(latest.command || '').trim()) {
+    const input = saved.inputs[index];
+    saved.inputs[index] = {
+      ...input,
+      name: String(latest.name || input.name),
+      command: String(latest.command),
+      cwd: latest.cwd ?? input.cwd,
+      wait: latest.wait ?? input.wait,
+      ready: normalizeReady(latest.ready ?? null),
+      timeout: Math.max(0, Number(latest.timeout) || 0),
+      when: normalizeCondition(latest.when ?? null),
+    };
+    step.name = saved.inputs[index].name;
+    step.command = saved.inputs[index].command;
+    step.background = saved.inputs[index].wait === false;
+  }
+  // this step, then whatever was skipped after it
+  const again = new Set<number>([index]);
+  run.steps.forEach((s, i) => {
+    if (i > index && s.status === 'skipped') again.add(i);
+  });
+  again.forEach((i) => {
+    const s = run.steps[i];
+    Object.assign(s, {
+      status: 'pending',
+      code: null,
+      startedAt: null,
+      endedAt: null,
+      tail: '',
+      note: null,
+      stopping: false,
+      readyState: null,
+      readyDetail: null,
+      readyAt: null,
+    });
+    stepStops.delete(`${run.id}:${i}`);
+    const outs = stepOutputs.get(run.id);
+    if (outs) outs[i] = '';
+  });
+  // a finished run opens again
+  run.status = 'running';
+  run.endedAt = null;
+  run.stopping = false;
+  run.settled = false;
+  stopRequested.delete(run.id);
+  chainDone.delete(run.id);
+  append(run, `\n↻ Retrying ${step.name}\n`);
+  publish(run);
+  drive(run, saved.stopOnError, again);
+  return snapshot(run);
 };
 
 export const startRun = (
@@ -900,6 +979,7 @@ export const startRun = (
     startedAt: Date.now(),
     endedAt: null,
     readyAt: null,
+    settled: false,
     output: '',
     steps: steps.map((s) => ({
       id: s.id,
@@ -1131,6 +1211,11 @@ export const registerCommandIpc = (
   );
   ipcMain.handle('commands:rerun', (event, runId: string, options) =>
     rerun(String(runId), options || {}),
+  );
+  ipcMain.handle(
+    'commands:retry',
+    (event, runId: string, index: number, latest?: Partial<RunStepInput>) =>
+      retryStep(String(runId), Number(index), latest || null),
   );
   ipcMain.handle('commands:clear', () => {
     [...runs.values()]

@@ -26,7 +26,85 @@ export interface SqlConn {
   password?: string;
   schema?: string; // postgres: search_path for the query
   tcp?: boolean; // connect to 127.0.0.1 instead of the local socket
+  host?: string; // a socket folder ("/tmp") or an address - found when the default fails
+  port?: number; // the server's port inside the container, when not the default
 }
+
+/** -h / -p for psql, pg_dump, pg_restore. */
+const pgWhere = (conn: SqlConn) => [
+  ...(conn.host || conn.tcp ? ['-h', conn.host || '127.0.0.1'] : []),
+  ...(conn.port ? ['-p', String(conn.port)] : []),
+];
+
+/** -h / -P for mysql, mysqldump. */
+const myWhere = (conn: SqlConn) =>
+  conn.host || conn.tcp || conn.port
+    ? [
+        '-h',
+        conn.host && !conn.host.startsWith('/') ? conn.host : '127.0.0.1',
+        '--protocol=TCP',
+        ...(conn.port ? ['-P', String(conn.port)] : []),
+      ]
+    : [];
+
+/** Where to look for the server's socket inside a container. */
+export const PG_SOCKET_DIRS = [
+  '/var/run/postgresql',
+  '/run/postgresql',
+  '/tmp',
+  '/opt/bitnami/postgresql/tmp',
+];
+
+/** The shell line that lists the sockets in those folders (one path per line). */
+export const listSocketsScript = (dirs = PG_SOCKET_DIRS) =>
+  dirs.map((d) => `ls -a ${d} 2>/dev/null | sed 's|^|${d}/|'`).join('; ');
+
+/** Postgres sockets (".s.PGSQL.5433") in what listSocketsScript printed. */
+export const socketsFrom = (listing: string) => {
+  const out: { host: string; port: number }[] = [];
+  listing.split(/\r?\n/).forEach((line) => {
+    const m = /^(\/.*)\/\.s\.PGSQL\.(\d+)$/.exec(line.trim());
+    if (m && !out.some((x) => x.host === m[1] && x.port === Number(m[2])))
+      out.push({ host: m[1], port: Number(m[2]) });
+  });
+  return out;
+};
+
+/** Ports the server may use instead of the default (env, `-p 5433` / `-c port=…`). */
+export const portHints = (
+  kind: DbKind,
+  env: Record<string, string>,
+  cmd: string[] = [],
+) => {
+  const found: number[] = [];
+  const add = (v?: string) => {
+    const n = Number(v);
+    if (Number.isInteger(n) && n > 0 && n < 65536 && !found.includes(n))
+      found.push(n);
+  };
+  if (kind === 'postgres') {
+    add(env.PGPORT);
+    add(env.POSTGRESQL_PORT_NUMBER);
+    add(env.POSTGRES_PORT);
+  } else {
+    add(env.MYSQL_TCP_PORT);
+    add(env.MARIADB_PORT_NUMBER);
+    add(env.MYSQL_PORT_NUMBER);
+  }
+  cmd.forEach((arg, i) => {
+    if (arg === '-p' || arg === '--port' || arg === '-P') add(cmd[i + 1]);
+    const eq = /^(?:--port=|port=)(\d+)$/.exec(arg);
+    if (eq) add(eq[1]);
+  });
+  return found;
+};
+
+/** The client could not reach a server at all (socket or TCP) - not a login / SQL error. */
+export const reachProblem = (stderr: string) =>
+  socketProblem(stderr) ||
+  /connection to server at .* failed|Connection refused|could not connect|Can't connect to (MySQL|MariaDB) server/i.test(
+    stderr,
+  );
 
 /**
  * Who to log in as, from the container env: the official images (POSTGRES_*, MYSQL_*,
@@ -118,7 +196,7 @@ export const sqlPlan = (
       argv: [
         'psql',
         '-X', // no ~/.psqlrc (not -q: it would hide "UPDATE 3")
-        ...(conn.tcp ? ['-h', '127.0.0.1'] : []),
+        ...pgWhere(conn),
         '-U',
         user,
         '-d',
@@ -142,7 +220,7 @@ export const sqlPlan = (
       : `${stmt};\nSELECT ROW_COUNT() AS __affected;\n`;
     if (dryRun) text = `START TRANSACTION;\n${text}ROLLBACK;\n`;
     const args = [
-      ...(conn.tcp ? ['-h', '127.0.0.1', '--protocol=TCP'] : []),
+      ...myWhere(conn),
       '-u',
       user,
       '--batch',
@@ -282,11 +360,12 @@ export const dumpPlan = (
   if (kind === 'postgres')
     return {
       env: password ? { PGPASSWORD: password } : {},
-      argv: ['pg_dump', '-U', user, '-Fc', '--no-owner', db],
+      argv: ['pg_dump', ...pgWhere(conn), '-U', user, '-Fc', '--no-owner', db],
       stdin: '',
     };
   if (kind === 'mysql' || kind === 'mariadb') {
     const args = [
+      ...myWhere(conn),
       '-u',
       user,
       '--single-transaction',
@@ -318,6 +397,7 @@ export const restorePlan = (
       env: password ? { PGPASSWORD: password } : {},
       argv: [
         'pg_restore',
+        ...pgWhere(conn),
         '-U',
         user,
         '-d',
@@ -328,7 +408,13 @@ export const restorePlan = (
       stdin: '',
     };
   if (kind === 'mysql' || kind === 'mariadb') {
-    const args = ['-u', user, '--default-character-set=utf8mb4', db];
+    const args = [
+      ...myWhere(conn),
+      '-u',
+      user,
+      '--default-character-set=utf8mb4',
+      db,
+    ];
     return {
       env: password ? { MYSQL_PWD: password } : {},
       argv: [kind === 'mariadb' ? 'mariadb' : 'mysql', ...args],

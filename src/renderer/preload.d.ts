@@ -3,6 +3,7 @@ import type { HttpResult, HttpSend } from '../main/httpClient';
 import type { OAuthRequest, OAuthToken } from '../main/oauth';
 import type { SqlResult } from '../main/sqlTools';
 import type { DockerfileRecipe } from '../main/dockerfileTools';
+import type { ComposeRun } from '../main/composeTools';
 import type { PortInfo } from '../main/ports';
 import type { Snapshot } from '../main/sqlRunner';
 import type { RunSnapshot, RunStepInput } from '../main/commandRunner';
@@ -68,6 +69,11 @@ export interface IElectronAPI {
         latest?: Record<string, Partial<RunStepInput>>;
       },
     ) => Promise<RunSnapshot | null>;
+    retry: (
+      runId: string,
+      index: number,
+      latest?: Partial<RunStepInput> | null,
+    ) => Promise<RunSnapshot | null>;
     clear: () => Promise<boolean>;
     pickFolder: (current?: string) => Promise<string | null>;
   };
@@ -128,6 +134,12 @@ export interface IElectronAPI {
   ports: {
     who: (port: number) => Promise<PortInfo>;
     kill: (pid: number) => Promise<{ ok: boolean; error: string | null }>;
+  };
+  compose: {
+    pick: (current?: string) => Promise<string | null>;
+    up: (run: ComposeRun) => Promise<{ ok: boolean; error: string | null }>;
+    down: (run: ComposeRun) => Promise<{ ok: boolean; error: string | null }>;
+    stop: (id: string) => Promise<boolean>;
   };
   dockerfile: {
     pick: (current?: string) => Promise<{ path: string; text: string } | null>;

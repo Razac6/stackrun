@@ -49,6 +49,8 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke('commands:output', runId, step),
     rerun: (runId: string, options?: any) =>
       ipcRenderer.invoke('commands:rerun', runId, options),
+    retry: (runId: string, index: number, latest?: any) =>
+      ipcRenderer.invoke('commands:retry', runId, index, latest),
     clear: () => ipcRenderer.invoke('commands:clear'),
     pickFolder: (current?: string) =>
       ipcRenderer.invoke('commands:pick-folder', current),
@@ -85,6 +87,12 @@ contextBridge.exposeInMainWorld('electron', {
   ports: {
     who: (port: number) => ipcRenderer.invoke('ports:who', port),
     kill: (pid: number) => ipcRenderer.invoke('ports:kill', pid),
+  },
+  compose: {
+    pick: (current?: string) => ipcRenderer.invoke('compose:pick', current),
+    up: (run: any) => ipcRenderer.invoke('compose:up', run),
+    down: (run: any) => ipcRenderer.invoke('compose:down', run),
+    stop: (id: string) => ipcRenderer.invoke('compose:stop', id),
   },
   dockerfile: {
     pick: (current?: string) => ipcRenderer.invoke('dockerfile:pick', current),

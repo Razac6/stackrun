@@ -123,6 +123,47 @@ describe('SQL connection', () => {
     );
   });
 
+  it('finds where the server listens: socket files, ports from env / command', () => {
+    expect(
+      t.socketsFrom(
+        [
+          '/var/run/postgresql/.',
+          '/var/run/postgresql/..',
+          '/var/run/postgresql/.s.PGSQL.5433',
+          '/var/run/postgresql/.s.PGSQL.5433.lock',
+          '/tmp/.s.PGSQL.6543',
+        ].join('\n'),
+      ),
+    ).toEqual([
+      { host: '/var/run/postgresql', port: 5433 },
+      { host: '/tmp', port: 6543 },
+    ]);
+    expect(
+      t.portHints('postgres', { PGPORT: '5440' }, [
+        'postgres',
+        '-p',
+        '5433',
+        '-c',
+        'port=5434',
+      ]),
+    ).toEqual([5440, 5433, 5434]);
+    const plan = t.sqlPlan('postgres', {}, 'shop', 'SELECT 1;', false, {
+      host: '/tmp',
+      port: 6543,
+    });
+    expect(plan.argv.join(' ')).toContain('-h /tmp -p 6543');
+    expect(
+      t.dumpPlan('postgres', {}, 'shop', { host: '127.0.0.1', port: 5433 })
+        .argv,
+    ).toContain('5433');
+    expect(
+      t.reachProblem(
+        'psql: error: connection to server at "127.0.0.1", port 5432 failed: Connection refused',
+      ),
+    ).toBe(true);
+    expect(t.reachProblem('ERROR:  relation "x" does not exist')).toBe(false);
+  });
+
   it('knows a missing socket and a refused login', () => {
     expect(
       t.socketProblem(

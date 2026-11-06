@@ -43,6 +43,7 @@ import BottomToast from './BottomToast';
 import useCopy from './useCopy';
 import { RemoveContainerDialog, VolumesView } from './DockerVolumes';
 import DockerfileDialog from './DockerfileDialog';
+import ComposeDialog from './ComposeDialog';
 import ResetDbDialog from './ResetDbDialog';
 import type { DockerStatus } from '../../../main/docker';
 import { RESETTABLE } from '../../../main/dockerTools';
@@ -495,6 +496,7 @@ export default function DockerTool() {
   const [resetting, setResetting] = useState<DockerContainer | null>(null);
   const [volumesKey, setVolumesKey] = useState(0);
   const [fromDockerfile, setFromDockerfile] = useState(false);
+  const [fromCompose, setFromCompose] = useState(false);
   const { copy, copied } = useCopy();
   const engineUp = useRef(false);
 
@@ -768,6 +770,14 @@ export default function DockerTool() {
             )}
           </>
         )}
+        <ComposeDialog
+          open={fromCompose}
+          onClose={() => setFromCompose(false)}
+          onStarted={(text) => {
+            flash(text);
+            refreshAll();
+          }}
+        />
         <DockerfileDialog
           open={fromDockerfile}
           onClose={() => setFromDockerfile(false)}
@@ -830,6 +840,15 @@ export default function DockerTool() {
                 )}
               </>
             )}
+          <Tooltip title="Pick a docker compose file: docker compose up -d in its folder">
+            <Button
+              size="small"
+              variant="contained"
+              onClick={() => setFromCompose(true)}
+            >
+              Compose up
+            </Button>
+          </Tooltip>
           <Tooltip title="Build an image from a Dockerfile and start a container of it">
             <Button
               size="small"

@@ -1,7 +1,13 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { entriesAt, getOutput, rerun, startRun } from './commandRunner';
+import {
+  entriesAt,
+  getOutput,
+  rerun,
+  retryStep,
+  startRun,
+} from './commandRunner';
 
 jest.mock('electron', () => ({
   BrowserWindow: { getAllWindows: () => [] },
@@ -147,5 +153,45 @@ describe('commandRunner', () => {
     expect(at('c-start')).toBeGreaterThan(-1);
     expect(at('c-start')).toBeLessThan(at('a-end'));
     expect(at('b-start')).toBeGreaterThan(at('a-end'));
+  });
+
+  it('retries a failed step inside its own run, then the steps skipped after it', async () => {
+    // fails the first time, works the second (a file marks the first try)
+    const mark = path
+      .join(os.tmpdir(), `stackrun-retry-${Date.now()}.txt`)
+      .split(path.sep)
+      .join('/');
+    const flaky = path
+      .join(os.tmpdir(), 'stackrun-flaky.js')
+      .split(path.sep)
+      .join('/');
+    fs.writeFileSync(
+      flaky,
+      "const fs = require('fs'); const f = process.argv[2]; if (!fs.existsSync(f)) { fs.writeFileSync(f, '1'); console.log('flaky-fail'); process.exit(2); } console.log('flaky-ok');",
+    );
+    const run = startRun(
+      [
+        { id: 'a', name: 'first', command: 'echo one', section: 'Stack' },
+        {
+          id: 'b',
+          name: 'flaky',
+          command: `node "${flaky}" "${mark}"`,
+          section: 'Stack › DB',
+        },
+        { id: 'c', name: 'after', command: 'echo after-it', section: 'Stack' },
+      ],
+      { label: 'stack', groupId: 'g-stack', stopOnError: true },
+    )!;
+    await waitFor(() => /Failed in/.test(getOutput(run.id)));
+    expect(retryStep(run.id, 0)).toBeNull(); // it did not fail
+    const again = retryStep(run.id, 1)!;
+    expect(again.id).toBe(run.id); // the same run, not a new one
+    expect(again.groupId).toBe('g-stack');
+    expect(again.status).toBe('running');
+    await waitFor(() => /Done in/.test(getOutput(run.id)));
+    expect(getOutput(run.id, 1)).toContain('flaky-ok');
+    expect(getOutput(run.id, 1)).not.toContain('flaky-fail');
+    expect(getOutput(run.id, 2)).toContain('after-it');
+    fs.rmSync(mark, { force: true });
   });
 });

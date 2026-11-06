@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { ThemeProvider } from '@mui/material/styles';
 import CssBaseline from '@mui/material/CssBaseline';
 import GlobalStyles from '@mui/material/GlobalStyles';
@@ -52,12 +52,18 @@ export default function App() {
     at: number;
   } | null>(null);
 
-  // Ctrl+K, or ⌘K on macOS: the app menu's "Go → Search…" sends it (see main.ts)
+  // Ctrl+K, or ⌘K on macOS (see main.ts); a repeat within 400 ms is ignored so one press
+  // can never open and close it at once. (Another app holding Ctrl+K as a global shortcut
+  // - Thingy used to - takes the key before it gets here.)
+  const lastSearchKey = useRef(0);
   useEffect(
     () =>
-      window.electron.ipcRenderer.on('app:search', () =>
-        setSearchOpen((o) => !o),
-      ),
+      window.electron.ipcRenderer.on('app:search', () => {
+        const now = Date.now();
+        if (now - lastSearchKey.current < 400) return;
+        lastSearchKey.current = now;
+        setSearchOpen((o) => !o);
+      }),
     [],
   );
 

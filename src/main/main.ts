@@ -21,6 +21,7 @@ import { registerHttpIpc } from './httpClient';
 import { registerOAuthIpc } from './oauth';
 import { registerSqlIpc, setSnapshotDir } from './sqlRunner';
 import { registerDockerfileIpc } from './dockerfileRunner';
+import { registerComposeIpc } from './composeRunner';
 import { registerPortIpc } from './ports';
 import { noticeDecision, readNotifySettings } from './notifySettings';
 
@@ -269,6 +270,7 @@ registerHttpIpc(ipcMain);
 registerOAuthIpc(ipcMain);
 registerSqlIpc(ipcMain);
 registerDockerfileIpc(ipcMain);
+registerComposeIpc(ipcMain);
 registerPortIpc(ipcMain);
 setSnapshotDir(path.join(app.getPath('userData'), 'sql-snapshots'));
 registerDockerIpc(ipcMain);
@@ -279,6 +281,16 @@ registerCommandIpc(ipcMain, {
 });
 
 // ---------------- window ----------------
+// The menu and the window's key handler both lead here: pass each shortcut on once
+const lastShortcut = new Map<string, number>();
+const sendShortcut = (channel: string) => {
+  const now = Date.now();
+  if (now - (lastShortcut.get(channel) || 0) < 400) return;
+  lastShortcut.set(channel, now);
+  showWindow();
+  mainWindow?.webContents.send(channel);
+};
+
 const buildMenu = () => {
   const mac = process.platform === 'darwin';
   // The shortcuts themselves are caught in before-input-event (createWindow): that works
@@ -291,19 +303,13 @@ const buildMenu = () => {
         label: 'Search…',
         accelerator: 'CmdOrCtrl+K',
         registerAccelerator: false,
-        click: () => {
-          showWindow();
-          mainWindow?.webContents.send('app:search');
-        },
+        click: () => sendShortcut('app:search'),
       },
       {
         label: 'Free a port…',
         accelerator: 'CmdOrCtrl+Shift+P',
         registerAccelerator: false,
-        click: () => {
-          showWindow();
-          mainWindow?.webContents.send('app:ports');
-        },
+        click: () => sendShortcut('app:ports'),
       },
     ],
   };
@@ -364,10 +370,10 @@ const createWindow = () => {
     const key = input.code || `Key${input.key.toUpperCase()}`;
     if (key === 'KeyK' && !input.shift) {
       event.preventDefault();
-      mainWindow?.webContents.send('app:search');
+      sendShortcut('app:search');
     } else if (key === 'KeyP' && input.shift) {
       event.preventDefault();
-      mainWindow?.webContents.send('app:ports');
+      sendShortcut('app:ports');
     }
   });
   mainWindow.webContents.on('will-navigate', (event, url) => {
