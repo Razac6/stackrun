@@ -41,7 +41,7 @@ export const BRAND_ORANGE = '#ff8a00';
 export const MENU: { mode: Mode; text: string; icon: React.ReactNode }[] = [
   { mode: 'commands', text: 'Commands', icon: <TerminalIcon /> },
   { mode: 'client', text: 'HTTP Client', icon: <HttpClientIcon /> },
-  { mode: 'sql', text: 'SQL Client', icon: <SqlClientIcon /> },
+  { mode: 'sql', text: 'DB Client', icon: <SqlClientIcon /> },
   { mode: 'docker', text: 'Docker', icon: <DockerIcon /> },
   { mode: 'notes', text: 'Notes', icon: <NotesIcon /> },
   { mode: 'compare', text: 'JSON compare', icon: <CompareIcon /> },

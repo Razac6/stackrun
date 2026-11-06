@@ -10,7 +10,17 @@ import {
   listContainers,
   resetDatabase,
 } from './docker';
-import { isSafeContainerRef, isSafeDbName } from './dockerTools';
+import { DbKind, isSafeContainerRef, isSafeDbName } from './dockerTools';
+import {
+  mongoDefaultDatabase,
+  mongoDumpPlan,
+  mongoListCollections,
+  mongoListDatabases,
+  mongoPlan,
+  mongoReachProblem,
+  mongoRestorePlan,
+  mongoResult,
+} from './mongoTools';
 import {
   dumpPlan,
   restorePlan,
@@ -32,6 +42,11 @@ import {
 } from './sqlTools';
 
 const MAX_ROWS = 2000;
+// what the DB Client works with: the SQL ones and MongoDB
+const CLIENT_KINDS: DbKind[] = [...SQL_KINDS, 'mongo'];
+const NOT_A_DB = 'Not a Postgres / MySQL / MariaDB / MongoDB container';
+const isClientDb = (kind?: DbKind | null): kind is DbKind =>
+  !!kind && CLIENT_KINDS.includes(kind);
 const running = new Map<string, ChildProcess>();
 
 const fail = (message: string, timeMs = 0): SqlResult => ({
@@ -190,12 +205,19 @@ export const runSql = async (
     return fail('Pick a database container');
   if (!sql.trim()) return fail('Nothing to run');
   const { container, env } = await containerEnv(containerId);
-  if (!container?.db || !SQL_KINDS.includes(container.db))
-    return fail('Not a Postgres / MySQL / MariaDB container');
+  if (!isClientDb(container?.db)) return fail(NOT_A_DB);
   if (container.state !== 'running') return fail('Start the container first');
+  const kind = container.db;
+  const mongo = kind === 'mongo';
+  if (mongo && dryRun)
+    return fail('MongoDB has no dry run here - turn "Dry run" off');
+  const unreachable = (stderr: string) =>
+    mongo ? mongoReachProblem(stderr) : reachProblem(stderr);
 
   const attempt = async (conn: SqlConn) => {
-    const plan = sqlPlan(container.db!, env, db, sql, dryRun, conn);
+    const plan = mongo
+      ? mongoPlan(env, db, sql, MAX_ROWS, conn)
+      : sqlPlan(kind, env, db, sql, dryRun, conn);
     if (!plan) return null;
     const envArgs = Object.entries(plan.env).flatMap(([k, v]) => [
       '-e',
@@ -230,18 +252,18 @@ export const runSql = async (
   // socket folder or port, TCP) and remember it. The first error is the one shown when
   // nothing answers - it says the most.
   let tried: string[] = [];
-  if (res.code !== 0 && reachProblem(res.stderr)) {
+  if (res.code !== 0 && unreachable(res.stderr)) {
     const first = res;
     places.delete(container.name);
     const base = connFor(container.name, schema);
-    const candidates = await candidatePlaces(containerId, container.db, env);
+    const candidates = await candidatePlaces(containerId, kind, env);
     tried = candidates.map(describePlace);
     let found = false;
     // eslint-disable-next-line no-restricted-syntax
     for (const place of candidates) {
       // eslint-disable-next-line no-await-in-loop
       const r = await attempt({ ...base, ...place });
-      if (r && (r.code === 0 || !reachProblem(r.stderr))) {
+      if (r && (r.code === 0 || !unreachable(r.stderr))) {
         res = r;
         places.set(container.name, place);
         found = true;
@@ -254,13 +276,15 @@ export const runSql = async (
   if (res.code !== 0) {
     const why = clean(res.stderr) || `Failed (exit ${res.code})`;
     const where =
-      tried.length && reachProblem(res.stderr)
+      tried.length && unreachable(res.stderr)
         ? `
 The server did not answer on its socket or on ${tried.join(', ')} inside the container - is it still starting, or does it listen somewhere else (listen_addresses, port)?`
         : '';
     return fail(`${why}${loginHint(res.stderr)}${where}`, timeMs);
   }
-  const result = toResult(container.db, res.stdout, MAX_ROWS, timeMs);
+  const result = mongo
+    ? mongoResult(res.stdout, MAX_ROWS, timeMs)
+    : toResult(kind, res.stdout, MAX_ROWS, timeMs);
   if (dryRun)
     result.message = `${result.message.replace(/ · ROLLBACK$/, '')} · rolled back, nothing kept`;
   return result;
@@ -401,7 +425,11 @@ export const takeSnapshot = async (
   const { container, env } = await inspectContainer(containerId);
   if (!container?.db)
     return { ok: false, error: 'Not a database', snapshot: null };
-  const plan = dumpPlan(container.db, env, db, connFor(container.name));
+  const conn = connFor(container.name);
+  const plan =
+    container.db === 'mongo'
+      ? mongoDumpPlan(env, db, conn)
+      : dumpPlan(container.db, env, db, conn);
   if (!plan) return { ok: false, error: 'Not supported', snapshot: null };
   const res = await runPlan(containerId, plan, null, 10 * 60 * 1000);
   if (res.code !== 0)
@@ -443,9 +471,25 @@ export const restoreSnapshot = async (
   if (!fs.existsSync(full)) return { ok: false, error: 'Snapshot not found' };
   const { container, env } = await inspectContainer(containerId);
   if (!container?.db) return { ok: false, error: 'Not a database' };
-  const plan = restorePlan(container.db, env, db, connFor(container.name));
+  const conn = connFor(container.name);
+  const mongo = container.db === 'mongo';
+  const plan = mongo
+    ? mongoRestorePlan(env, db, conn)
+    : restorePlan(container.db, env, db, conn);
   if (!plan) return { ok: false, error: 'Not supported' };
-  const reset = await resetDatabase(containerId, db);
+  // empty it first: what was made after the snapshot goes too (mongo: with the login
+  // the client uses, not only the official image's root)
+  const reset = mongo
+    ? await runSql(
+        `reset-${containerId}`,
+        containerId,
+        db,
+        'db.dropDatabase()',
+        60000,
+        false,
+        undefined,
+      ).then((r) => ({ ok: r.ok, error: r.ok ? null : r.message }))
+    : await resetDatabase(containerId, db);
   if (!reset.ok)
     return { ok: false, error: reset.error || 'Could not empty it' };
   const res = await runPlan(
@@ -484,13 +528,13 @@ export const cancelSql = (runId: string) => {
   return !!child;
 };
 
-/** Running database containers the SQL tool can use. */
+/** Running database containers the DB Client can use. */
 export const sqlTargets = async () => {
   const { containers, error } = await listContainers();
   return {
     error,
     targets: containers
-      .filter((c) => c.db && SQL_KINDS.includes(c.db))
+      .filter((c) => isClientDb(c.db))
       .map((c) => ({
         id: c.id,
         name: c.name,
@@ -520,15 +564,12 @@ const firstColumn = async (containerId: string, db: string, sql: string) => {
 /** Databases of a container - and why not, when it cannot connect. */
 export const sqlDatabases = async (containerId: string) => {
   const { container, env } = await inspectContainer(containerId);
-  if (!container?.db || !SQL_KINDS.includes(container.db))
-    return {
-      databases: [],
-      error: 'Not a Postgres / MySQL / MariaDB container',
-    };
-  const sql = listDatabasesSql(container.db);
+  if (!isClientDb(container?.db)) return { databases: [], error: NOT_A_DB };
+  const mongo = container.db === 'mongo';
+  const sql = mongo ? mongoListDatabases : listDatabasesSql(container.db);
   let r = await firstColumn(
     containerId,
-    defaultDatabase(container.db, env),
+    mongo ? mongoDefaultDatabase(env) : defaultDatabase(container.db, env),
     sql,
   );
   // the default database may not exist: postgres always has "postgres"
@@ -557,9 +598,15 @@ export const sqlTables = async (
   schema?: string,
 ) => {
   const { container } = await inspectContainer(containerId);
-  if (!container?.db || !SQL_KINDS.includes(container.db)) return [];
+  if (!isClientDb(container?.db)) return [];
   return (
-    await firstColumn(containerId, db, listTablesSql(container.db, schema))
+    await firstColumn(
+      containerId,
+      db,
+      container.db === 'mongo'
+        ? mongoListCollections
+        : listTablesSql(container.db, schema),
+    )
   ).list;
 };
 

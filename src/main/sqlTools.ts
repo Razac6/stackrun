@@ -86,6 +86,9 @@ export const portHints = (
     add(env.PGPORT);
     add(env.POSTGRESQL_PORT_NUMBER);
     add(env.POSTGRES_PORT);
+  } else if (kind === 'mongo') {
+    add(env.MONGODB_PORT_NUMBER);
+    add(env.MONGO_PORT);
   } else {
     add(env.MYSQL_TCP_PORT);
     add(env.MARIADB_PORT_NUMBER);
@@ -157,7 +160,7 @@ export const socketProblem = (stderr: string) =>
 
 /** A friendlier line for a refused login. */
 export const loginHint = (stderr: string) =>
-  /password authentication failed|no password supplied|Access denied for user|role "[^"]+" does not exist|authentication failed/i.test(
+  /password authentication failed|no password supplied|Access denied for user|role "[^"]+" does not exist|authentication failed|requires authentication/i.test(
     stderr,
   )
     ? ' - set the user / password under "Connection…"'

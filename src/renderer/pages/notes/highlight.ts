@@ -5,7 +5,13 @@ import { alpha, Theme } from '@mui/material/styles';
 // One highlight.js instance for notes: the common languages plus the HTTP request format
 hljs.registerLanguage('http', http);
 
-export type CodeLanguage = 'json' | 'markdown' | 'http' | 'sql' | 'plain';
+export type CodeLanguage =
+  | 'json'
+  | 'markdown'
+  | 'http'
+  | 'sql'
+  | 'javascript'
+  | 'plain';
 
 const escapeHtml = (text: string) =>
   text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');

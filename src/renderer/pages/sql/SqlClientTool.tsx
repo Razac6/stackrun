@@ -1,6 +1,7 @@
-// SQL Client: pick a database container (Postgres / MySQL / MariaDB in Docker) and a
-// database, write SQL (or take it from a note) and run it. Every change can be tried with
-// a rollback first, and versions of the database - named like commits - let you go back.
+// DB Client: pick a database container (Postgres / MySQL / MariaDB / MongoDB in Docker)
+// and a database, write SQL - or a mongosh script - (or take it from a note) and run it.
+// SQL changes can be tried with a rollback first, and versions of the database - named
+// like commits - let you go back.
 import React, {
   useCallback,
   useEffect,
@@ -46,6 +47,11 @@ import NotesIcon from '@mui/icons-material/DescriptionOutlined';
 import SaveOutlinedIcon from '@mui/icons-material/SaveOutlined';
 import type { SqlResult } from '../../../main/sqlTools';
 import { changesData } from '../../../main/sqlTools';
+import {
+  mongoBrowse,
+  mongoChanges,
+  mongoStatementAt,
+} from '../../../main/mongoTools';
 import type { Snapshot } from '../../../main/sqlRunner';
 import CodeArea from '../notes/CodeArea';
 import BottomToast from '../notes/BottomToast';
@@ -66,7 +72,8 @@ interface Saved {
   container: string;
   db: string;
   schema: string; // postgres
-  text: string;
+  text: string; // SQL
+  mongoText: string; // the mongosh script, kept apart from the SQL
   dryRun: boolean;
   autoVersion: boolean;
   logins: Record<string, { user: string; password: string }>; // typed in, by container
@@ -76,6 +83,7 @@ const KIND_LABEL: Record<string, string> = {
   postgres: 'Postgres',
   mysql: 'MySQL',
   mariadb: 'MariaDB',
+  mongo: 'MongoDB',
 };
 
 const ago = (at: number) => {
@@ -99,6 +107,7 @@ export default function SqlClientTool() {
     db: '',
     schema: '',
     text: '',
+    mongoText: '',
     dryRun: false,
     autoVersion: true,
     logins: {},
@@ -149,6 +158,7 @@ export default function SqlClientTool() {
             schema: String(v.schema || ''),
             logins: v.logins && typeof v.logins === 'object' ? v.logins : {},
             text: String(v.text || ''),
+            mongoText: String(v.mongoText || ''),
             dryRun: !!v.dryRun,
             autoVersion: v.autoVersion !== false,
           }));
@@ -188,6 +198,12 @@ export default function SqlClientTool() {
   const target = targets.find((t) => t.name === saved.container) || null;
 
   const isPostgres = target?.kind === 'postgres';
+  const isMongo = target?.kind === 'mongo';
+  // the script of this kind: SQL, or mongosh for MongoDB
+  const text = isMongo ? saved.mongoText : saved.text;
+  const setText = (t: string) =>
+    update(isMongo ? { mongoText: t } : { text: t });
+  const dryRun = saved.dryRun && !isMongo;
   useEffect(() => {
     setDbError(null);
     if (!target?.running) {
@@ -276,8 +292,8 @@ export default function SqlClientTool() {
       say('Nothing to run', true);
       return;
     }
-    const change = changesData(sql);
-    if (change && !saved.dryRun && saved.autoVersion) {
+    const change = isMongo ? mongoChanges(sql) : changesData(sql);
+    if (change && !dryRun && saved.autoVersion) {
       const ok = await saveVersion(
         `Before: ${sql.replace(/\s+/g, ' ').trim().slice(0, 80)}`,
         true,
@@ -290,29 +306,27 @@ export default function SqlClientTool() {
         return;
     }
     runId.current = `sql-${Date.now()}`;
-    setBusy(saved.dryRun ? 'Running (will roll back)…' : 'Running…');
+    setBusy(dryRun ? 'Running (will roll back)…' : 'Running…');
     setRan(sql);
     const r = await window.electron.sql.run(
       runId.current,
       target.name,
       saved.db,
       sql,
-      saved.dryRun,
+      dryRun,
       schema,
     );
     setBusy(null);
     setResult(r);
-    if (change && !saved.dryRun) loadTables();
+    if (change && !dryRun) loadTables();
   };
 
   const runAtCursor = (el: HTMLTextAreaElement | null) => {
-    const stmt = statementAt(
-      saved.text,
-      el?.selectionStart ?? saved.text.length,
-    );
+    const at = el?.selectionStart ?? text.length;
+    const stmt = isMongo ? mongoStatementAt(text, at) : statementAt(text, at);
     const selected =
       el && el.selectionEnd > el.selectionStart
-        ? saved.text.slice(el.selectionStart, el.selectionEnd)
+        ? text.slice(el.selectionStart, el.selectionEnd)
         : '';
     run(selected || stmt?.text || '');
   };
@@ -332,31 +346,32 @@ export default function SqlClientTool() {
   };
 
   const saveAsNote = async () => {
-    if (!saved.text.trim()) return;
-    const first = saved.text
+    if (!text.trim()) return;
+    const first = text
       .trim()
       .split('\n')[0]
-      .replace(/^--\s*/, '')
+      .replace(/^(--|\/\/)\s*/, '')
       .slice(0, 60);
     await window.electron.database.createNote({
-      title: first || 'SQL',
-      content: saved.text,
-      format: 'sql',
+      title: first || (isMongo ? 'MongoDB' : 'SQL'),
+      // a mongosh script goes in a markdown note, as a code block
+      content: isMongo ? `\`\`\`js\n${text.trim()}\n\`\`\`\n` : text,
+      format: isMongo ? 'markdown' : 'sql',
       tags: [],
       notebook: '',
       pinned: false,
     });
-    say('Saved as an SQL note');
+    say(isMongo ? 'Saved as a note' : 'Saved as an SQL note');
   };
 
   // checked as you type: unbalanced brackets, unterminated strings / comments
   const check = useMemo(
-    () => (saved.text.trim() ? checkSql(saved.text) : { ok: true as const }),
-    [saved.text],
+    () => (text.trim() && !isMongo ? checkSql(text) : { ok: true as const }),
+    [text, isMongo],
   );
   const tryFix = () => {
-    const fixed = repairSql(saved.text);
-    update({ text: fixed.text });
+    const fixed = repairSql(text);
+    setText(fixed.text);
     say(
       fixed.fixes.length
         ? `${fixed.fixes.join(' · ')}${fixed.ok ? '' : ' - still something to look at'}`
@@ -439,8 +454,8 @@ export default function SqlClientTool() {
         {targetsError && <Alert severity="warning">{targetsError}</Alert>}
         {targetsLoaded && !targetsError && !targets.length && (
           <Typography variant="body2" color="text.secondary">
-            No Postgres / MySQL / MariaDB containers. Start one (Docker) and
-            refresh.
+            No Postgres / MySQL / MariaDB / MongoDB containers. Start one
+            (Docker) and refresh.
           </Typography>
         )}
         {target && !target.running && (
@@ -520,7 +535,8 @@ export default function SqlClientTool() {
           </Button>
         )}
         <Typography variant="overline" color="text.secondary" sx={{ mt: 0.5 }}>
-          Tables {tables.length ? `(${tables.length})` : ''}
+          {isMongo ? 'Collections' : 'Tables'}{' '}
+          {tables.length ? `(${tables.length})` : ''}
         </Typography>
         <Box sx={{ flex: 1, minHeight: 80, overflow: 'auto' }}>
           {tables.map((t) => (
@@ -529,15 +545,19 @@ export default function SqlClientTool() {
               onClick={() => {
                 const name =
                   schema && schema !== 'public' ? `${schema}.${t}` : t;
-                const q = `SELECT * FROM ${name} LIMIT 100;`;
-                update({
-                  text: saved.text.trim()
-                    ? `${saved.text.replace(/\s*$/, '')}\n\n${q}`
-                    : q,
-                });
+                const q = isMongo
+                  ? mongoBrowse(t)
+                  : `SELECT * FROM ${name} LIMIT 100;`;
+                setText(
+                  text.trim() ? `${text.replace(/\s*$/, '')}\n\n${q}` : q,
+                );
                 run(q);
               }}
-              title="Show the first 100 rows"
+              title={
+                isMongo
+                  ? 'Show the first 100 documents'
+                  : 'Show the first 100 rows'
+              }
               sx={{
                 display: 'flex',
                 alignItems: 'center',
@@ -633,7 +653,7 @@ export default function SqlClientTool() {
                 size="small"
                 startIcon={<PlaylistPlayIcon />}
                 disabled={!!busy}
-                onClick={() => run(saved.text)}
+                onClick={() => run(text)}
               >
                 Run all
               </Button>
@@ -649,12 +669,19 @@ export default function SqlClientTool() {
               Stop
             </Button>
           )}
-          <Tooltip title="Run it in a transaction that is rolled back: see the result, keep nothing (MySQL keeps CREATE / ALTER / DROP anyway)">
+          <Tooltip
+            title={
+              isMongo
+                ? 'Not for MongoDB - save a version first instead (it is made on its own before changes)'
+                : 'Run it in a transaction that is rolled back: see the result, keep nothing (MySQL keeps CREATE / ALTER / DROP anyway)'
+            }
+          >
             <FormControlLabel
+              disabled={isMongo}
               control={
                 <Switch
                   size="small"
-                  checked={saved.dryRun}
+                  checked={dryRun}
                   onChange={(e) => update({ dryRun: e.target.checked })}
                 />
               }
@@ -678,18 +705,20 @@ export default function SqlClientTool() {
               />
             </Tooltip>
           )}
-          <Tooltip title="Format the SQL">
-            <span>
-              <IconButton
-                size="small"
-                disabled={!saved.text.trim()}
-                onClick={() => update({ text: formatSql(saved.text) })}
-                aria-label="Format SQL"
-              >
-                <FormatAlignLeftIcon fontSize="small" />
-              </IconButton>
-            </span>
-          </Tooltip>
+          {!isMongo && (
+            <Tooltip title="Format the SQL">
+              <span>
+                <IconButton
+                  size="small"
+                  disabled={!text.trim()}
+                  onClick={() => setText(formatSql(text))}
+                  aria-label="Format SQL"
+                >
+                  <FormatAlignLeftIcon fontSize="small" />
+                </IconButton>
+              </span>
+            </Tooltip>
+          )}
           {target && saved.db && (
             <Chip
               size="small"
@@ -698,7 +727,13 @@ export default function SqlClientTool() {
               sx={{ fontFamily: MONO_FONT, fontSize: 11 }}
             />
           )}
-          <Tooltip title="Optional: put the SQL of a note in">
+          <Tooltip
+            title={
+              isMongo
+                ? 'Optional: put the text of a note in'
+                : 'Optional: put the SQL of a note in'
+            }
+          >
             <Button
               size="small"
               startIcon={<NotesIcon />}
@@ -707,11 +742,17 @@ export default function SqlClientTool() {
               From note…
             </Button>
           </Tooltip>
-          <Tooltip title="Save this script as an SQL note">
+          <Tooltip
+            title={
+              isMongo
+                ? 'Save this script as a note'
+                : 'Save this script as an SQL note'
+            }
+          >
             <span>
               <IconButton
                 size="small"
-                disabled={!saved.text.trim()}
+                disabled={!text.trim()}
                 onClick={saveAsNote}
                 aria-label="Save as note"
               >
@@ -732,14 +773,16 @@ export default function SqlClientTool() {
           }}
         >
           <CodeArea
-            value={saved.text}
-            onChange={(text) => update({ text })}
-            language="sql"
+            value={text}
+            onChange={setText}
+            language={isMongo ? 'javascript' : 'sql'}
             minHeight="100%"
-            ariaLabel="SQL"
+            ariaLabel={isMongo ? 'MongoDB script' : 'SQL'}
             errorLine={check.ok ? undefined : check.line}
             placeholder={
-              '-- Ctrl/⌘+Enter runs the statement under the cursor\nSELECT * FROM users LIMIT 10;'
+              isMongo
+                ? '// Ctrl/⌘+Enter runs the statement under the cursor - its value is shown\ndb.users.find({ active: true }).limit(10)'
+                : '-- Ctrl/⌘+Enter runs the statement under the cursor\nSELECT * FROM users LIMIT 10;'
             }
           />
         </Box>
@@ -1050,8 +1093,8 @@ export default function SqlClientTool() {
         <DialogContent>
           <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
             Stackrun logs in with the container&apos;s own settings
-            (POSTGRES_USER, MYSQL_ROOT_PASSWORD…). When those do not work, type
-            the user here.
+            (POSTGRES_USER, MYSQL_ROOT_PASSWORD, MONGO_INITDB_ROOT_USERNAME…).
+            When those do not work, type the user here.
           </Typography>
           <TextField
             fullWidth
@@ -1197,18 +1240,17 @@ export default function SqlClientTool() {
 
       <NotePicker
         open={fromNote}
-        title="SQL from a note"
-        prefer="sql"
+        title={isMongo ? 'Script from a note' : 'SQL from a note'}
+        prefer={isMongo ? undefined : 'sql'}
         onClose={() => setFromNote(false)}
         onPick={(note) => {
           setFromNote(false);
-          const sql = noteText(note, 'sql');
-          update({
-            text: saved.text.trim()
-              ? `${saved.text.replace(/\s*$/, '')}\n\n${sql}`
-              : sql,
-          });
-          say(`Added the SQL of "${note.title || 'Untitled'}"`);
+          const sql = noteText(
+            note,
+            isMongo ? '(?:javascript|js|mongo)' : 'sql',
+          );
+          setText(text.trim() ? `${text.replace(/\s*$/, '')}\n\n${sql}` : sql);
+          say(`Added the text of "${note.title || 'Untitled'}"`);
         }}
       />
       <BottomToast

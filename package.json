@@ -2,7 +2,7 @@
   "name": "stackrun",
   "description": "Dev notes, command packages, Docker and handy dev tools",
   "license": "MIT",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "author": {
     "name": "thingy",
     "email": "binekmarcin@gmail.com",
